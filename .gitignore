@@ -1,0 +1,28 @@
+# dotenv
+.env
+
+# LangChain / Chroma vector DB
+chroma_db/
+
+# 虛擬環境
+venv/chroma_db/
+venv/
+
+# _pycache
+src/__pycache__/
+
+# macOS 系統檔
+.DS_Store
+output/.DS_Store
+
+# 忽略 data 資料夾（含 PDF 自動產物）
+data/chroma_db/
+data/
+venv/
+.env
+
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+.env.*
