@@ -114,27 +114,6 @@ def expand_retrieved_chunks_v2(vectorstore, retrieved_docs: List[Document]) -> L
 
     return expanded_docs
 
-# === reranker ===
-def rerank_appendix_with_embedding(query: str, appendix_docs: List[Document], embedding_model, top_k=3) -> List[Document]:
-    if not appendix_docs:
-        return []
-
-    query_embedding = embedding_model.embed_query(query)
-    doc_texts = [doc.page_content for doc in appendix_docs]
-    doc_embeddings = embedding_model.embed_documents(doc_texts)
-
-    def cosine_similarity(a, b):
-        a = np.array(a)
-        b = np.array(b)
-        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-    scored_docs = [
-        (doc, cosine_similarity(query_embedding, doc_emb))
-        for doc, doc_emb in zip(appendix_docs, doc_embeddings)
-    ]
-
-    return [doc for doc, _ in sorted(scored_docs, key=lambda x: x[1], reverse=True)[:top_k]]
-
 # === RetrievalQA 使用的靜態 retriever 類別 ===
 class StaticRetriever(BaseRetriever):
     docs: List[Document]
@@ -151,7 +130,6 @@ class FilteredRetriever(BaseRetriever):
         return [doc for doc, score in docs_and_scores if score >= self.threshold]
 
 # === 組建 RetrievalQA Chain ===
-
 def build_retrieval_qa_chain(client, docs: List[Document], prompt_template):
     if len(docs) > 5:
         docs = docs[:5]
@@ -169,62 +147,7 @@ def build_retrieval_qa_chain(client, docs: List[Document], prompt_template):
     return RunnableLambda(invoke_fn) # 回傳 callable
 
 # === Keyword-based retriever ===
-# def keyword_based_retriever(vectorstore: Chroma, keywords: List[str], top_k: int = 3) -> List[Document]:
-#     matched_docs = []
-#     seen_chunk_ids = set()
-
-#     # 取得所有 chunks（使用 include 取得 metadata）
-#     all_chunks = vectorstore.get(include=["documents", "metadatas"])
-
-#     for content, meta in zip(all_chunks["documents"], all_chunks["metadatas"]):
-#         if any(kw in content for kw in keywords):
-#             cid = meta.get("CHUNK_ID")
-#             if cid not in seen_chunk_ids:
-#                 matched_docs.append(Document(page_content=content, metadata=meta))
-#                 seen_chunk_ids.add(cid)
-#                 if len(matched_docs) >= top_k:
-#                     break  # 最多 top_k 筆
-
-#     return matched_docs
-
-# def keyword_based_retriever(vectorstore: Chroma, query: str, keywords: List[str], top_k: int = 3) -> List[Document]:
-#     matched_docs = []
-#     seen_chunk_ids = set()
-
-#     # 取得所有 chunks（使用 include 取得 metadata）
-#     all_chunks = vectorstore.get(include=["documents", "metadatas"])
-
-#     # 先找出最多 10 筆 keyword 命中資料
-#     for content, meta in zip(all_chunks["documents"], all_chunks["metadatas"]):
-#         if any(kw in content for kw in keywords):
-#             cid = meta.get("CHUNK_ID")
-#             if cid not in seen_chunk_ids:
-#                 matched_docs.append(Document(page_content=content, metadata=meta))
-#                 seen_chunk_ids.add(cid)
-#                 if len(matched_docs) >= 10:
-#                     break  # 最多先取 10 筆
-
-#     if not matched_docs:
-#         return []
-
-#     # 計算語意相似度 rerank
-#     query_embedding = embeddings.embed_query(query)
-#     doc_embeddings = embeddings.embed_documents([doc.page_content for doc in matched_docs])
-
-#     def cosine_similarity(a, b):
-#         a = np.array(a)
-#         b = np.array(b)
-#         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-#     scored_docs = [
-#         (doc, cosine_similarity(query_embedding, emb))
-#         for doc, emb in zip(matched_docs, doc_embeddings)
-#     ]
-#     top_docs = sorted(scored_docs, key=lambda x: x[1], reverse=True)[:top_k]
-
-#     return [doc for doc, _ in top_docs]
-
-def keyword_based_retriever(vectorstore: Chroma, query: str, keywords: List[str], top_k: int = 3) -> List[Document]:
+def keyword_based_retriever(vectorstore: Chroma, query: str, keywords: List[str], top_k: int = 8) -> List[Document]:
     seen_chunk_ids = set()
     all_chunks = vectorstore.get(include=["documents", "metadatas"])
 
@@ -254,4 +177,16 @@ def keyword_based_retriever(vectorstore: Chroma, query: str, keywords: List[str]
                 break
 
     return matched_docs
+
+# --- 新增：共用小工具（打包 docs 與 context） ---
+def pack_docs(docs: List[Document], max_docs: int = 8) -> dict:
+    items = []
+    for d in docs[:max_docs]:
+        items.append({
+            "doc_id": d.metadata.get("CHUNK_ID") or d.metadata.get("id") or d.metadata.get("doc_id"),
+            "text": d.page_content,
+            "meta": d.metadata,
+        })
+    context = "\n---\n".join([x["text"] for x in items])
+    return {"docs": items, "context": context}
 

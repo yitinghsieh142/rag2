@@ -1,0 +1,26 @@
+# LangChain 相關
+langchain
+langchain-openai
+langchain-community
+langchain-chroma
+langchain-core
+
+# Embeddings
+sentence-transformers   # (HuggingFaceEmbeddings 需要)
+torch                   # (HuggingFaceEmbeddings 需要)
+
+# Utilities
+python-dotenv
+pydantic
+tqdm
+numpy
+pandas
+jieba
+nltk
+
+# Evaluation
+rouge
+rouge-chinese
+
+# Ranking
+rank-bm25

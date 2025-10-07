@@ -2,55 +2,55 @@
 from langchain.prompts import PromptTemplate
 
 # 第一階段 prompt
-decision_prompt_template = """
-###Instruction###
-You are a professional assistant specializing in Taiwanese insurance policies. Based on the following insurance clause content and appendix titles, please determine whether the provided information is sufficient to answer the user's question.
+# decision_prompt_template = """
+# ###Instruction###
+# You are a professional assistant specializing in Taiwanese insurance policies. Based on the following insurance clause content and appendix titles, please determine whether the provided information is sufficient to answer the user's question.
 
-###Task###
-- Based on the following insurance clause content and appendix titles, determine whether you can directly answer the user's question.
-
-
-- If you can answer the question with the provided context, please provide a full response using the format below:
-- The section below may contain 2 to 5 different insurance clause snippets. Identify and extract only the relevant information needed to answer the user's question. Your answer must be based strictly on the information in the provided context. Avoid introducing content that is not explicitly mentioned. If the answer cannot be found, say:「找不到相關內容」.
-- 請提供詳細的回答，不要給簡答
-
-回答：
-[Your answer in Traditional Chinese. Do not repeat the user's question.]
-
-條文依據：
-[Cite relevant clause or article if applicable. If none, say:「找不到相關內容」.]
-
-###Reference Example - DO NOT COPY, FOR STYLE ONLY###
-Example Question:  
-國泰人壽真漾心安住院醫療終身保險保障範圍包括哪些項目？
-
-Example Answer:  
-回答：  
-保障項目包含：住院醫療保險金、加護病房或燒燙傷病房保險金、祝壽保險金、身故保險金或喪葬費用保險金，以及所繳保險費的退還。  
-條文依據：  
-摘要中明確列出上述保障項目，為本商品之主要給付項目。
+# ###Task###
+# - Based on the following insurance clause content and appendix titles, determine whether you can directly answer the user's question.
 
 
-- If you cannot answer the question without more information, please reply in this format.
-- You must extract `needed_appendix_titles` only from the provided Appendix Titles list.
-{{ "answerable": false, "needed_appendix_titles": [""] }}
+# - If you can answer the question with the provided context, please provide a full response using the format below:
+# - The section below may contain 2 to 5 different insurance clause snippets. Identify and extract only the relevant information needed to answer the user's question. Your answer must be based strictly on the information in the provided context. Avoid introducing content that is not explicitly mentioned. If the answer cannot be found, say:「找不到相關內容」.
+# - 請提供詳細的回答，不要給簡答
+
+# 回答：
+# [Your answer in Traditional Chinese. Do not repeat the user's question.]
+
+# 條文依據：
+# [Cite relevant clause or article if applicable. If none, say:「找不到相關內容」.]
+
+# ###Reference Example - DO NOT COPY, FOR STYLE ONLY###
+# Example Question:  
+# 國泰人壽真漾心安住院醫療終身保險保障範圍包括哪些項目？
+
+# Example Answer:  
+# 回答：  
+# 保障項目包含：住院醫療保險金、加護病房或燒燙傷病房保險金、祝壽保險金、身故保險金或喪葬費用保險金，以及所繳保險費的退還。  
+# 條文依據：  
+# 摘要中明確列出上述保障項目，為本商品之主要給付項目。
 
 
-###User Question###
-{question}
+# - If you cannot answer the question without more information, please reply in this format.
+# - You must extract `needed_appendix_titles` only from the provided Appendix Titles list.
+# {{ "answerable": false, "needed_appendix_titles": [""] }}
 
-###Context###
-The following insurance clause content was retrieved based on the user's question:
 
-{context}
+# ###User Question###
+# {question}
 
-###Appendix Titles (Potentially Related)###
-{appendix_titles}
-"""
-decision_prompt = PromptTemplate(
-    template=decision_prompt_template,
-    input_variables=["question", "context", "appendix_titles"]
-)
+# ###Context###
+# The following insurance clause content was retrieved based on the user's question:
+
+# {context}
+
+# ###Appendix Titles (Potentially Related)###
+# {appendix_titles}
+# """
+# decision_prompt = PromptTemplate(
+#     template=decision_prompt_template,
+#     input_variables=["question", "context", "appendix_titles"]
+# )
 
 # 第二階段 prompt
 rag_prompt_template = """
@@ -97,105 +97,46 @@ prompt = PromptTemplate(
 )
 
 # 指標評分 prompt
-# answer_evaluation_prompt_template = """
-# ###Instruction###
-# You are an evaluator for a RAG insurance assistant. Your task is to assess the quality of the generated answer using the retrieved context and the user’s question.
-
-# ###Task###
-# Before evaluating, first analyze the user's question and list the key information points required to answer it. For example: specific parameters, formulas, or clause conditions.  
-# This breakdown will help you strictly evaluate whether the context and answer each cover these required points.
-
-# Then, evaluate the answer using the four criteria listed below.  
-# Each score must be a number between 0 and 1.  
-# After each score, briefly explain your reasoning in Traditional Chinese.
-
-# - 1.0 = Fully meets expectations  
-# - 0.0 = Does not meet expectations at all  
-# - Intermediate scores are allowed and encouraged when appropriate.
-
-# Please deduct points for any issues, including incorrect citation, format violation, hallucination, missing key information, or unclear response.
-# For answers based on table-like appendix content, if the model cannot precisely interpret and align the correct value from the table (e.g., matching year to coefficient), treat this as a reasoning error.
-# Deduct points from Context Adherence and Answer Relevancy even if the final number seems plausible.
-
-# 1. Context Relevancy  
-#    Based on the key information points you just extracted, check whether each of them is present in the retrieved context. If any required point is missing, deduct points.
-
-# 2. Context Adherence 
-#    Check whether the generated answer is fully faithful to the retrieved context. If there are any incorrect inferences, wrong numbers, or hallucinated content not found in the context, deduct points.
-
-# 3. Answer Relevancy
-#    Evaluate whether the answer addresses and correctly resolves every required element in the user's question. If the answer is only partial or contains reasoning errors, deduct points.
-
-# 4. Grading Note
-#     Does the answer follow the required format:  
-#    - First paragraph starts with「回答：」containing the actual answer  
-#    - Second paragraph starts with「條文依據：」stating the cited source(s)
-   
-# Any violation should lead to deductions.
-
-# ###Input###
-# User Question:
-# {query}
-
-# Retrieved Context:
-# {context}
-
-# Generated Answer:
-# {answer}
-
-# ###Output Format###
-# Do not repeat the input or add extra commentary.  
-# Return the evaluation result in the following JSON format. No additional explanation or text outside the JSON block.
-# ```json
-# {{  
-#     "Required Information Points": ["point 1", "point 2", ...]
-#     "Context Relevancy": score, Explanation
-#     "Context Adherence": score, Explanation
-#     "Answer Relevancy": score, Explanation
-#     "Grading Note": score, Explanation
-# }}
-# """
+# 指標評分（僅依據已提供的 Information Points 檢核答案覆蓋度）
 answer_evaluation_prompt_template = """
 ###Instruction###
-You are an evaluator for a RAG insurance assistant. Your task is to assess the quality of the generated answer using the retrieved context and the user’s question.
+You are an evaluator for a RAG insurance assistant.
+You will be given:
+1) the user's question, and
+2) a pre-computed list of **Information Points** (from an upstream tool),
+3) the generated **answer**.
 
 ###Task###
-Step 1: Analyze the user's question and extract the **Required Information Points** — the specific facts, conditions, or criteria that the answer must address.  
-These are the key elements needed to accurately answer the user's question.
-Each key point must be written in **Traditional Chinese**.
-
-Step 2: For each **Required Information Point**, evaluate whether it is supported by the retrieved context and is correctly addressed in the answer.  
-Please assign a score between **0 and 1**, based on the degree to which this point is supported and answered.  
-- You may use any value between 0 and 1 (e.g., 0.2, 0.75, 1.0), based on your judgment.
-
+- Do NOT create new information points and do NOT modify the provided ones.
+- For each information point, give a score between 0 and 1.  
+- For **each information point**, if the answer touches on or roughly covers the point, assign a high score (close to 1.0). 
+- If the answer clearly misses the point, assign 0.  
+- No need to be strict; as long as the point is covered, it should receive credit.  
+- Write all point descriptions and any brief notes in **Traditional Chinese**.
 
 ###Input###
 User Question:
 {query}
 
-Retrieved Context:
-{context}
+Information Points (JSON array from upstream tool; each has id/description/must_have):
+{information_points}
 
 Generated Answer:
 {answer}
 
 ###Output Format###
-Do not repeat the input or add extra commentary.  
-Return the evaluation result in the following JSON format only.
-
-```json
-{{
-    "Required Information Points": [
-        {{ "Point 1": "", "分數":  }},
-        {{ "Point 2": "", "分數":  }}
-        ...
-    ]
-}}
+Return **only** a JSON array (no code block, no extra text).  
+Each element must include: "id", "point", "分數".
+Example:
+[
+  {{ "id": "1", "point": "需判斷是否符合無理賠回饋保險金之給付條件", "must_have": true,  "分數": 1.0 }},
+  {{ "id": "2", "point": "需確認保單年度末仍生存之要件", "must_have": false, "分數": 0.5 }}
+]
 """
 
 answer_evaluation_prompt = PromptTemplate(
     template=answer_evaluation_prompt_template,
-    input_variables=["query", "context", "answer"]
+    input_variables=["query", "information_points", "answer"]
 )
 
 # query 修正 prompt
@@ -241,4 +182,53 @@ query_expanding_prompt_template = """
 query_expanding_prompt = PromptTemplate(
     template=query_expanding_prompt_template,
     input_variables=["query", "context", "answer"]
+)
+
+# ── Information Need（知識點拆解）prompt ─────────────────────────────────────
+information_need_prompt_template = """
+###Instruction###
+You are an expert assistant for Taiwanese insurance Q&A.
+Given a user question, decompose it into Information Points with two tiers:
+1) **Core points** that are directly required to answer the question (must_have = true).
+2) **Optional points** that are helpful but not strictly required (must_have = false).
+
+###Guidelines###
+- Output **2–6** points in total.
+- **Core points (must_have=true)**: 1–3 項，必須直接來自問題文字本身、能構成「完整回答」所需的要素。
+- **Optional points (must_have=false)**: 0–3 項，只能在與問題高度相關且能實際補強理解時加入；請勿臆測等待期、文件、例外等未被提及的要素。
+- Each point should be short and clear (1 sentence or phrase in Traditional Chinese).
+- Do not include assumptions or extra details not mentioned by the user.
+
+###Output Format (IMPORTANT)###
+Return **only** a valid JSON array (no code block, no extra text).
+Each element must be an object with keys: "id", "description", "must_have".
+
+###Example###
+User Question: 「加護病房保險金有哪些給付範圍？」
+Output:
+[
+  {{
+    "id": "1",
+    "description": "確認是否有加護病房保險金保障",
+    "must_have": true
+  }},
+  {{
+    "id": "2",
+    "description": "確認加護病房保險金之給付範圍/條件",
+    "must_have": true
+  }},
+  {{
+    "id": "3",
+    "description": "（如問題涉及）確認是否包含燒燙傷病房之適用",
+    "must_have": false
+  }}
+]
+
+###User Question###
+{query}
+"""
+
+information_need_prompt = PromptTemplate(
+    template=information_need_prompt_template,
+    input_variables=["query"]
 )
