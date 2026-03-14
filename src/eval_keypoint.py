@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import ast
+import pandas as pd
 from typing import List, Tuple
 from langchain_openai import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
@@ -24,58 +25,6 @@ client = AzureChatOpenAI(
     openai_api_version=api_version,
     temperature=0
 )
-
-### 生成 keypoint 的 prompt，暫時不需使用
-# keypoint_prompt_template = """
-# You are a professional insurance expert in Taiwan.
-# In this task, you will be given a question and a standard answer. Based on the standard
-# answer, you need to summarize 2 to 5 key points necessary to answer the question.
-# These key points should:
-
-# 1. Be directly relevant to the question.
-# 2. Be factual and self-contained.
-# 3. Clearly reflect the main facts or logic of the standard answer.
-# 4. Be written in clear and concise Traditional Chinese sentences.
-# 5. Do not include any information not found in the standard answer.
-
-# ---
-
-# Example:
-# Question: 國泰人壽真漾心安住院醫療終身保險燒燙傷病房保險金怎麼申領?
-
-# Standard Answer: 
-# 需求文件：
-# 1. 保險單或其謄本
-# 2. 保險金申請書
-# 3. 醫療診斷書或住院證明。申請「加護病房或燒燙傷病房保險金」者，須列明進、出加護病房或
-# 燒燙傷病房日期。（但要保人或被保險人為醫師時，不得為被保險人出具診斷書或住院證
-# 明。）
-# 4. 受益人的身分證明
-
-# Key Points:
-# 1. 申請燒燙傷病房保險金時需附上保險單或其謄本。
-# 2. 須提供完整的保險金申請書。
-# 3. 須檢附列明進出燒燙傷病房日期的醫療診斷書或住院證明。
-# 4. 若要保人或被保險人為醫師，不得為被保險人自行出具診斷書或住院證明。
-# 5. 受益人需提供身分證明文件。
-
-# ---
-
-# Question: {question}
-
-# Standard Answer: {ground_truth}
-
-# Key Points:
-# 1.
-# """
-
-# keypoint_prompt = PromptTemplate(
-#     template=keypoint_prompt_template,
-#     input_variables=["question", "ground_truth"]
-# )
-
-# keypoint_chain = LLMChain(llm=client, prompt=keypoint_prompt)
-
 
 
 ### 評分 prompt 輸入：問題、回答、keypoint 做使用
@@ -105,7 +54,6 @@ Scoring Guidelines:
 
 
 DO NOT classify into a single label. Only assign scores.
-DO NOT assign a single label. Only assign scores.
 [[[Wrongness Score]]] should only receive a high value when there is a specific factual or logical conflict between the key point and the generated answer. If key content is missing, increase the [[[Irrelevance Score]]] instead.
 [[[Relevance Score]]] does not require the generated answer to include all details. It is enough to reflect the main idea of the key point, even with different wording or partial coverage.
 Make sure the number of key points evaluated exactly matches the number listed. Do not skip, merge, or duplicate any key points.
@@ -145,10 +93,6 @@ def normalize_numbers(s: str) -> str:
     trans_table = str.maketrans('０１２３４５６７８９．', '0123456789.')
     return s.translate(trans_table)
 
-# def extract_scores(text: str, label: str) -> list[float]:
-#     pattern = rf"{label}\s*[:：]?\s*\*{{0,2}}\s*([0-9０１２３４５６７８９．.]+)"
-#     matches = re.findall(pattern, text)
-#     return [float(normalize_numbers(m)) for m in matches]
 def extract_scores(text: str, label: str) -> list[float]:
     # 1) 清掉粗體與常見列表符號
     cleaned = text.replace("**", "")
@@ -194,45 +138,233 @@ def calculate_evaluation_ratios(model_responses: List[str], keypoints_num: int) 
     irrelevant_ratio = sum(irrelevant_scores) / keypoints_num
 
     print(f"➡️ keypoints_num: {keypoints_num}")
-    return hallucination_ratio, completeness_ratio, irrelevant_ratio
+    return hallucination_ratio, completeness_ratio, irrelevant_ratio, relevance_scores, irrelevant_scores, wrong_scores
 
+def parse_keypoints_cell(cell_value) -> List[str]:
+    """
+    支援以下格式：
+    1. Python list 字串: "['A', 'B']"
+    2. 真正的 list
+    3. 多行文字:
+       1. A
+       2. B
+    4. 單一字串
+    """
+    if pd.isna(cell_value):
+        return []
 
-# === 啟動互動模式 ===
-print("保險問答 LLM 評估模式，輸入enter可離開\\n")
-print("輸入順序：問題 → key points（多行）→ 生成答案（多行）\n")
-while True:
-    sample_question = input("輸入問題：").strip()
-    if not sample_question:
-        print("離開")
-        break
+    if isinstance(cell_value, list):
+        return [str(x).strip() for x in cell_value if str(x).strip()]
 
-    print("🔹 請貼上 keypoints（list 格式）：")
-    keypoints_str = sys.stdin.read().strip()
+    text = str(cell_value).strip()
+    if not text:
+        return []
+
+    # 嘗試當成 Python list parse
     try:
-        keypoints_list = ast.literal_eval(keypoints_str)
-        if not isinstance(keypoints_list, list):
-            raise ValueError
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
     except Exception:
-        print("❌ keypoints 格式錯誤，請確保是 Python list 格式，例如：['A', 'B']")
-        continue
+        pass
 
+    # 嘗試多行格式
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1:
+        cleaned_lines = []
+        for line in lines:
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)  # 去掉 1. / 1)
+            cleaned_lines.append(line.strip())
+        return [x for x in cleaned_lines if x]
+
+    # 單一字串
+    return [text]
+
+def score_single_case(question: str, generated_answer: str, keypoints_list: List[str]) -> Tuple[str, float, float, float]:
     keypoints_formatted = list_to_keypoints_str(keypoints_list)
     keypoints_num = len(keypoints_list)
 
-    print("🔹 輸入 GPT 生成答案（輸入完請按 Ctrl+D）：")
-    generated_answer = sys.stdin.read().strip()
-
-    # 呼叫 GPT 評分
     score_output = score_chain.run(
-        question=sample_question,
+        question=question,
         generated_answer=generated_answer,
         keypoints=keypoints_formatted,
         keypoints_num=keypoints_num
     )
 
-    print("\n===== GPT 評分結果 =====")
-    print(score_output)
+    hallucination, completeness, irrelevance, relevance_scores, irrelevant_scores, wrong_scores = calculate_evaluation_ratios(
+        [score_output], keypoints_num
+    )
 
-    hallucination, completeness, irrelevance = calculate_evaluation_ratios([score_output], keypoints_num)
-    print(f"幻覺率: {hallucination:.2f} | 完整率: {completeness:.2f} | 無關率: {irrelevance:.2f}")
-    print("="*60)
+    output_text = (
+        f"Relevance Scores: {relevance_scores}\n"
+        f"Irrelevance Scores: {irrelevant_scores}\n"
+        f"Wrongness Scores: {wrong_scores}"
+    )
+
+    llm_reasoning = score_output
+
+    return score_output, completeness, hallucination, irrelevance, output_text, llm_reasoning
+
+
+# =========================
+# 單題模式
+# =========================
+def run_single_mode():
+    print("保險問答 LLM 單題評估模式，輸入 enter 可離開\n")
+    print("請直接貼上問題、回答、keypoints\n")
+
+    while True:
+        sample_question = input("輸入問題：").strip()
+        if not sample_question:
+            print("離開")
+            break
+
+        generated_answer = input("輸入回答：").strip()
+        if not generated_answer:
+            print("❌ 回答不可為空")
+            continue
+
+        keypoints_raw = input("輸入 keypoints（Python list 格式，例如 ['A', 'B']）：").strip()
+        try:
+            keypoints_list = ast.literal_eval(keypoints_raw)
+            if not isinstance(keypoints_list, list):
+                raise ValueError
+        except Exception:
+            print("❌ keypoints 格式錯誤，請確保是 Python list 格式，例如：['A', 'B']")
+            continue
+
+        score_output, completeness, hallucination, irrelevance, output_text, llm_reasoning = score_single_case(
+            sample_question,
+            generated_answer,
+            keypoints_list
+        )
+
+        print("\n===== GPT 評分結果 =====")
+        print(score_output)
+        print(f"完整率 completeness: {completeness:.4f}")
+        print(f"幻覺率 hallucination: {hallucination:.4f}")
+        print(f"無關率 irrlevance: {irrelevance:.4f}")
+        print("=" * 60)
+
+        print("\n===== output =====")
+        print(output_text)
+
+        print("\n===== llm_reasoning =====")
+        print(llm_reasoning)
+
+
+# =========================
+# Excel 批次模式
+# =========================
+def run_excel_mode():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
+
+    default_input_path = os.path.join(project_root, "data", "rag_test_0308.xlsx")
+
+    print("\nExcel 批次驗證模式")
+    user_path = input(f"請輸入 Excel 路徑（直接 Enter 使用預設：{default_input_path}）：").strip()
+    input_path = user_path if user_path else default_input_path
+
+    if not os.path.exists(input_path):
+        print(f"❌ 找不到檔案：{input_path}")
+        return
+
+    print(f"讀取檔案中：{input_path}")
+    df = pd.read_excel(input_path)
+
+    required_cols = ["商品代號", "問題", "回答", "Keypoint"]
+    for col in required_cols:
+        if col not in df.columns:
+            print(f"❌ Excel 缺少欄位：{col}")
+            return
+
+    # 保留你要的欄名拼法
+    if "completeness" not in df.columns:
+        df["completeness"] = None
+    if "hallucination" not in df.columns:
+        df["hallucination"] = None
+    if "irrlevance" not in df.columns:
+        df["irrlevance"] = None
+    if "output" not in df.columns:
+        df["output"] = None
+    if "llm_reasoning" not in df.columns:
+        df["llm_reasoning"] = None
+
+    total = len(df)
+    print(f"共 {total} 筆資料，開始評分...\n")
+
+    for idx, row in df.iterrows():
+        product_code = row.get("商品代號", "")
+        question = "" if pd.isna(row.get("問題")) else str(row.get("問題")).strip()
+        answer = "" if pd.isna(row.get("回答")) else str(row.get("回答")).strip()
+        keypoints_list = parse_keypoints_cell(row.get("Keypoint"))
+
+        print(f"處理第 {idx + 1}/{total} 筆 | 商品代號: {product_code}")
+
+        if not question or not answer or not keypoints_list:
+            print("  ⚠️ 問題 / 回答 / Keypoint 缺值，跳過")
+            df.at[idx, "completeness"] = None
+            df.at[idx, "hallucination"] = None
+            df.at[idx, "irrlevance"] = None
+            continue
+
+        try:
+            _, completeness, hallucination, irrelevance, output_text, llm_reasoning = score_single_case(
+                question,
+                answer,
+                keypoints_list
+            )
+
+            df.at[idx, "completeness"] = round(completeness, 4)
+            df.at[idx, "hallucination"] = round(hallucination, 4)
+            df.at[idx, "irrlevance"] = round(irrelevance, 4)
+            df.at[idx, "output"] = output_text
+            df.at[idx, "llm_reasoning"] = llm_reasoning
+
+            print(
+                f"  ✅ completeness={completeness:.4f}, "
+                f"hallucination={hallucination:.4f}, "
+                f"irrlevance={irrelevance:.4f}"
+            )
+
+        except Exception as e:
+            print(f"  ❌ 第 {idx + 1} 筆失敗：{e}")
+            df.at[idx, "completeness"] = None
+            df.at[idx, "hallucination"] = None
+            df.at[idx, "irrlevance"] = None
+            df.at[idx, "output"] = None
+            df.at[idx, "llm_reasoning"] = None
+
+    save_choice = input("\n要覆蓋原檔嗎？(y/n): ").strip().lower()
+
+    if save_choice == "y":
+        output_path = input_path
+    else:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_scored{ext}"
+
+    df.to_excel(output_path, index=False)
+    print(f"\n✅ 已完成並儲存至：{output_path}")
+
+
+# =========================
+# 主程式入口
+# =========================
+def main():
+    print("請選擇模式：")
+    print("1. 單一題目驗證")
+    print("2. 整個 Excel 檔案驗證")
+
+    mode = input("輸入 1 或 2：").strip()
+
+    if mode == "1":
+        run_single_mode()
+    elif mode == "2":
+        run_excel_mode()
+    else:
+        print("❌ 無效輸入，請重新執行")
+
+
+if __name__ == "__main__":
+    main()

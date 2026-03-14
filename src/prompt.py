@@ -1,58 +1,7 @@
 # prompts.py
 from langchain.prompts import PromptTemplate
 
-# 第一階段 prompt
-# decision_prompt_template = """
-# ###Instruction###
-# You are a professional assistant specializing in Taiwanese insurance policies. Based on the following insurance clause content and appendix titles, please determine whether the provided information is sufficient to answer the user's question.
-
-# ###Task###
-# - Based on the following insurance clause content and appendix titles, determine whether you can directly answer the user's question.
-
-
-# - If you can answer the question with the provided context, please provide a full response using the format below:
-# - The section below may contain 2 to 5 different insurance clause snippets. Identify and extract only the relevant information needed to answer the user's question. Your answer must be based strictly on the information in the provided context. Avoid introducing content that is not explicitly mentioned. If the answer cannot be found, say:「找不到相關內容」.
-# - 請提供詳細的回答，不要給簡答
-
-# 回答：
-# [Your answer in Traditional Chinese. Do not repeat the user's question.]
-
-# 條文依據：
-# [Cite relevant clause or article if applicable. If none, say:「找不到相關內容」.]
-
-# ###Reference Example - DO NOT COPY, FOR STYLE ONLY###
-# Example Question:  
-# 國泰人壽真漾心安住院醫療終身保險保障範圍包括哪些項目？
-
-# Example Answer:  
-# 回答：  
-# 保障項目包含：住院醫療保險金、加護病房或燒燙傷病房保險金、祝壽保險金、身故保險金或喪葬費用保險金，以及所繳保險費的退還。  
-# 條文依據：  
-# 摘要中明確列出上述保障項目，為本商品之主要給付項目。
-
-
-# - If you cannot answer the question without more information, please reply in this format.
-# - You must extract `needed_appendix_titles` only from the provided Appendix Titles list.
-# {{ "answerable": false, "needed_appendix_titles": [""] }}
-
-
-# ###User Question###
-# {question}
-
-# ###Context###
-# The following insurance clause content was retrieved based on the user's question:
-
-# {context}
-
-# ###Appendix Titles (Potentially Related)###
-# {appendix_titles}
-# """
-# decision_prompt = PromptTemplate(
-#     template=decision_prompt_template,
-#     input_variables=["question", "context", "appendix_titles"]
-# )
-
-# 第二階段 prompt
+# answer prompt
 rag_prompt_template = """
 ###Instruction###
 You are a professional assistant specializing in Taiwanese insurance policies.
@@ -60,17 +9,46 @@ You are a professional assistant specializing in Taiwanese insurance policies.
 ###Task###
 Your job is to help users understand specific insurance clauses based on the provided context. Focus on delivering accurate, concise answers in Traditional Chinese.
 
-###Context###
-The section below may contain 2 to 5 different insurance clause snippets. Identify and extract only the relevant information needed to answer the user's question. Your answer must be based strictly on the information in the provided context. Avoid introducing content that is not explicitly mentioned. If the answer cannot be found, say:「找不到相關內容」.
+If Information Points are provided, you should use them as a checklist of what the answer should cover:
+- Prioritize must-have points first.
+- Optional points may be included only if they are supported by the context.
+- Do not introduce any content not supported by the provided context.
 
-###Format###
+###Critical Rules###
+1. You MUST only use information from the provided context.
+2. You MUST clearly indicate which specific clause snippet supports your answer.
+3. In the "條文依據" section, you MUST cite the corresponding CHUNK_ID exactly as shown in the context.
+4. Citation format must follow exactly:
+   - [Title]
+5. For exclusion clauses, exceptions, or proviso-style clauses（如「不在此限」）, your answer must follow the clause logic faithfully:
+   - first state the general rule,
+   - then clearly state any exception if explicitly provided in the context.
+6. Do not oversimplify exclusion clauses into an absolute yes/no answer when the clause contains exceptions.
+7. When answering exclusion-responsibility questions, use wording that stays close to the clause meaning.
+
+If multiple clauses are used, list them separately.
+If the answer cannot be found, say:
+回答：
+找不到相關內容
+條文依據：
+找不到相關內容
+
+###Date Reasoning Rules###
+- Taiwanese dates may use the Minguo calendar (民國年).
+- Convert using: Gregorian year = Minguo year + 1911 (e.g., 114 = 2025, 115 = 2026).
+- For date-related questions, do NOT compare dates by surface form only. You must first identify and apply any policy-defined time concepts in the context, such as 保單年度、保險單週年日、指定日期、年度末、生效日、等待期間.
+- If the clause defines when eligibility should be checked (for example, at 保險單年度末、指定日期、或保險單週年日), you must use that defined time point rather than the diagnosis date or claim date alone.
+- When answering, briefly explain the key time reasoning steps if the question involves policy year calculation or eligibility timing.
+
+###Format (STRICT)###
 Please begin your response with「回答：」and follow the exact format below:
 
 回答：
 [Your answer in Traditional Chinese. Do not repeat the user's question.]
 
 條文依據：
-[Cite relevant clause or article if applicable. If none, say:「找不到相關內容」.]
+- [第xx條 Title]
+- [第xx條 Title]
 
 ###Reference Example - DO NOT COPY, FOR STYLE ONLY###
 Example Question:  
@@ -80,7 +58,7 @@ Example Answer:
 回答：  
 保障項目包含：住院醫療保險金、加護病房或燒燙傷病房保險金、祝壽保險金、身故保險金或喪葬費用保險金，以及所繳保險費的退還。  
 條文依據：  
-摘要中明確列出上述保障項目，為本商品之主要給付項目。
+摘要
 
 ---
 
@@ -89,6 +67,9 @@ Example Answer:
 
 ###使用者問題：
 {query}
+
+###Information Points###
+{info_points}
 """
 
 prompt = PromptTemplate(
@@ -231,4 +212,101 @@ Output:
 information_need_prompt = PromptTemplate(
     template=information_need_prompt_template,
     input_variables=["query"]
+)
+
+# ── Answer Revision（重新生成答案）prompt ─────────────────────────────────────
+
+answer_revision_prompt_template = """
+###Instruction###
+You are a professional assistant specializing in Taiwanese insurance policies.
+
+You are revising a previously generated answer based on evaluation weaknesses.
+You MUST strictly follow the rules below.
+
+###Critical Rules###
+1. You MUST only use information from the provided retrieved_docs.
+2. You MUST NOT use outside knowledge.
+3. If a statement cannot be supported by retrieved_docs, you MUST write:
+   「條款未明確規定／資料不足」
+4. Output ONLY the revised answer. Do NOT include explanations, analysis, or system notes.
+5. Citation format must follow exactly:
+   - [Title]
+6. For exclusion clauses, exceptions, or proviso-style clauses（如「不在此限」）, your answer must follow the clause logic faithfully:
+   - first state the general rule,
+   - then clearly state any exception if explicitly provided in the context.
+7. Do not oversimplify exclusion clauses into an absolute yes/no answer when the clause contains exceptions.
+8. When answering exclusion-responsibility questions, use wording that stays close to the clause meaning.
+
+---
+
+###Revision Logic###
+
+You are given:
+
+- prev_answer
+- weakness_type (may contain "coverage", "factual", or both)
+- low_keypoints (only meaningful if weakness_type includes "coverage")
+- retrieved_docs (the ONLY source of truth)
+
+Follow these rules:
+
+1) If weakness_type includes "coverage":
+   - Improve ONLY the parts related to low_keypoints.
+   - Keep the rest of the answer as close as possible to prev_answer.
+   - Do NOT rewrite unrelated sections unnecessarily.
+
+2) If weakness_type includes "factual":
+   - EVERY statement must be directly supported by retrieved_docs.
+   - If any part of prev_answer lacks support, correct or remove it.
+   - Never guess, infer, or extrapolate.
+
+3) If both coverage and factual exist:
+   - First ensure factual correctness.
+   - Then strengthen low_keypoints without introducing unsupported claims.
+
+---
+
+###Date Reasoning Rules###
+- Taiwanese dates may use the Minguo calendar (民國年).
+- Convert using: Gregorian year = Minguo year + 1911 (e.g., 114 = 2025, 115 = 2026).
+- For date-related questions, do NOT compare dates by surface form only. You must first identify and apply any policy-defined time concepts in the context, such as 保單年度、保險單週年日、指定日期、年度末、生效日、等待期間.
+- If the clause defines when eligibility should be checked (for example, at 保險單年度末、指定日期、或保險單週年日), you must use that defined time point rather than the diagnosis date or claim date alone.
+- When answering, briefly explain the key time reasoning steps if the question involves policy year calculation or eligibility timing.
+
+---
+
+###Format (STRICT)###
+
+回答：
+[Revised answer in Traditional Chinese. Do NOT repeat the user question.]
+
+---
+
+###Input###
+
+User Question:
+{query}
+
+Previous Answer:
+{prev_answer}
+
+Weakness Type:
+{weakness_type}
+
+Low Keypoints:
+{low_keypoints}
+
+Retrieved Documents:
+{retrieved_docs}
+"""
+
+answer_revision_prompt = PromptTemplate(
+    template=answer_revision_prompt_template,
+    input_variables=[
+        "query",
+        "prev_answer",
+        "weakness_type",
+        "low_keypoints",
+        "retrieved_docs"
+    ]
 )

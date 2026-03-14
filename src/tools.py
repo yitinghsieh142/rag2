@@ -8,25 +8,27 @@ from langchain.schema import BaseRetriever
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from FlagEmbedding import FlagReranker
+
+
 import os
 import re 
 import json
 from dotenv import load_dotenv
-from typing import List, Set, Tuple, Optional
+from typing import List, Dict, Set, Tuple, Optional, Literal
 
 from utils import (
     extract_prod_id_from_query,
     build_vectorstore,
-    load_softlink_mapping,
-    get_softlinked_appendix_titles,
     expand_retrieved_chunks_v2,
-    build_retrieval_qa_chain,
     FilteredRetriever,
-    keyword_based_retriever,
     pack_docs,
 )
 
-from prompt import prompt, answer_evaluation_prompt, query_expanding_prompt, information_need_prompt
+from test_nli import compute_nli_score
+
+from prompt import prompt, answer_evaluation_prompt, query_expanding_prompt, information_need_prompt, answer_revision_prompt
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # === 讀取環境變數 ===
 load_dotenv()
@@ -49,23 +51,51 @@ RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANKER_FP16 = os.getenv("RERANKER_FP16", "1").lower() in {"1", "true", "yes"}
 reranker = FlagReranker(RERANKER_MODEL, use_fp16=RERANKER_FP16)
 
-# === tool：各指標答案評分 ===
-def evaluate_answer_metrics(query: str, information_points, answer: str) -> str:
+
+# === 各指標答案評分 ===
+def evaluate_answer_metrics(
+    query: str,
+    information_points,
+    answer: str,
+    expanded_docs,
+    context: str = "",
+    difficulty: str = "hard",
+    alpha: float = 1.0,
+    beta: float = 0.6,
+) -> str:
     """
-    依據 InformationNeedTool 產生的資訊點評估答案覆蓋度。
-    現在會「評分所有資訊點」，並在回傳中加上「信心分數」：
-    - 權重：must_have=True → 0.8；must_have=False → 0.2
-    - 計算：加權平均 = sum(weight_i * score_i) / sum(weight_i)
-    支援的 information_points 型態：
-      - list[dict], list[str], str(JSON)
-    回傳：JSON 字串：
+    Answer Evaluator (Coverage + NLI Factuality)
+
+    Coverage:
+      - 由 answer_evaluation_prompt (LLM) 針對 info points 打分 (0~1)
+      - must_have=True 權重 0.8；False 權重 0.2
+      - 得到 coverage_score ∈ [0,1]
+
+    NLI Factuality:
+      - 呼叫 compute_nli_score()
+      - 直接使用回傳的 C_fact ∈ [0,1]
+
+
+    Final:
+      - C_conf = (coverage_score^alpha) * (C_fact^beta)
+
+    回傳 JSON 字串：
     {
-      "points": [ { "id","point","must_have","分數" }, ... ],
-      "信心分數": <float>
+      "points": [...],
+      "coverage_score": 0.xx,
+      "nli": {
+        "probs": {"entailment":..., "neutral":..., "contradiction":...},
+        "factuality": ...,
+        "C_fact": ...
+      },
+      "C_conf": ...,
+      "信心分數": ...   # 為了相容舊版 key
     }
     """
 
-    # 1) 正規化資訊點
+    # -----------------------
+    # helpers
+    # -----------------------
     def _normalize_info_points(obj):
         if isinstance(obj, str):
             s = obj.strip()
@@ -101,15 +131,35 @@ def evaluate_answer_metrics(query: str, information_points, answer: str) -> str:
                 norm.append({"id": _id, "description": desc, "must_have": must})
                 seen.add(desc)
         return norm
+    
+    def _get_doc_fields(d):
+        if isinstance(d, dict):
+            meta = d.get("meta", {}) or {}
+            title = meta.get("TITLE", "")
+            text = d.get("text", "") or ""
+            return title, text
+        else:
+            meta = getattr(d, "metadata", {}) or {}
+            title = meta.get("TITLE", "")
+            text = getattr(d, "page_content", "") or ""
+            return title, text
+
+    # 1) easy: 把 query 本身當作 must-have keypoint（不需經過 information_need_tool）
 
     norm_points = _normalize_info_points(information_points)
 
-    # 限制 1~8 條，避免過長（但評分是全部，不再只取 must_have）
-    if len(norm_points) > 8:
-        norm_points = norm_points[:8]
+    if difficulty.lower() == "easy":
+        norm_points = [{
+            "id": "Q",
+            "description": query.strip(),
+            "must_have": True
+        }]
 
-    # 2) 丟給評分 Prompt（新版不吃 context；要求輸出每點含 must_have）
+    # 最多 5 個（避免 prompt 爆）
+    norm_points = norm_points[:5]
     info_points_json = json.dumps(norm_points, ensure_ascii=False)
+
+    # 2) Coverage by LLM
     chain = answer_evaluation_prompt | client
     result_msg = chain.invoke({
         "query": query,
@@ -118,43 +168,37 @@ def evaluate_answer_metrics(query: str, information_points, answer: str) -> str:
     })
     raw = (result_msg.content or "").strip()
 
-    # 3) 嘗試解析模型輸出的 JSON array
-    def _parse_points(s: str):
-        try:
-            arr = json.loads(s)
-            if isinstance(arr, list):
-                return arr
-        except Exception:
-            # 寬鬆抓取最外層 []
-            try:
-                start, end = s.find('['), s.rfind(']')
-                if start != -1 and end != -1 and end > start:
-                    arr = json.loads(s[start:end+1])
-                    if isinstance(arr, list):
-                        return arr
-            except Exception:
-                pass
-        return []
+    # model_points = _parse_points(raw)
+    chain = answer_evaluation_prompt | client
+    result_msg = chain.invoke({
+        "query": query,
+        "information_points": info_points_json,
+        "answer": answer
+    })
 
-    model_points = _parse_points(raw)
+    raw = (result_msg.content or "").strip()
 
-    # 4) 保障 must_have 正確性（以 upstream 的 norm_points 為基準回填）
+    try:
+        model_points = json.loads(raw)
+    except Exception:
+        model_points = []
+
     must_map = {p["id"]: bool(p.get("must_have", True)) for p in norm_points}
+
     fixed_points = []
     for p in model_points:
         pid = str(p.get("id", "")).strip()
-        point_desc = p.get("point") or p.get("description") or ""
-        score = p.get("分數")
-        # 清洗
+
         try:
-            score = float(score)
+            score = float(p.get("分數", 0.0))
         except Exception:
             score = 0.0
+
         fixed_points.append({
-            "id": pid if pid else str(len(fixed_points) + 1),
-            "point": str(point_desc).strip(),
+            "id": pid,
+            "point": p.get("point", ""),
             "must_have": must_map.get(pid, True),
-            "分數": max(0.0, min(1.0, score)),
+            "分數": max(0.0, min(1.0, score))
         })
 
     # 若模型輸出異常，fallback：用 norm_points 建空白分數
@@ -166,51 +210,113 @@ def evaluate_answer_metrics(query: str, information_points, answer: str) -> str:
     # 5) 計算「信心分數」（加權平均）
     total_w = 0.0
     total_ws = 0.0
+
     for p in fixed_points:
         w = 0.8 if p.get("must_have", True) else 0.2
         s = float(p.get("分數", 0.0))
         total_w += w
         total_ws += w * s
-    confidence = round((total_ws / total_w) if total_w > 0 else 0.0, 4)
+    # confidence = round((total_ws / total_w) if total_w > 0 else 0.0, 4)
+    coverage_score = round(total_ws / total_w, 4) if total_w else 0.0
 
-    # 6) 回傳整包 JSON
-    out = {
+
+    # 3 NLI factuality
+    def _extract_reference_block(answer: str) -> str:
+        if not isinstance(answer, str):
+            return ""
+        if "條文依據" not in answer:
+            return ""
+        return answer.split("條文依據", 1)[1].strip()
+
+    ref_block = _extract_reference_block(answer)
+
+    cited_articles = re.findall(r"第[一二三四五六七八九十百千0-9]+條", ref_block)
+    cited_articles = list(set(cited_articles))
+
+    # 是否包含「摘要」
+    SUMMARY_KEYWORDS = [
+        "摘要",
+        "內容摘要",
+        "條款摘要",
+        "條文摘要",
+        "重點摘要",
+        "說明",
+        "條款說明",
+        "概述",
+        "保障範圍",
+        "保障內容",
+        "附表"
+    ]
+    include_summary = any(k in ref_block for k in SUMMARY_KEYWORDS)
+
+    debug_cited_ids = []
+    if include_summary:
+        debug_cited_ids.append("摘要")
+    debug_cited_ids.extend(cited_articles)
+
+    print("\n========== [DEBUG expanded_docs] ==========")
+    print("cited_ids", cited_articles)
+
+    if not expanded_docs:
+        print("expanded_docs 是空的！")
+
+    cited_contexts = []
+
+    for d in (expanded_docs or []):
+        title, text = _get_doc_fields(d)
+
+        if not text.strip():
+            continue
+
+        # 若模型有寫條號 → 用條號比對 TITLE
+        if cited_articles:
+            if any(article in title for article in cited_articles):
+                cited_contexts.append(text)
+        else:
+            # 沒引用條號 → 使用全部 expanded_docs
+            cited_contexts.append(text)
+
+    print("matched_context_count:", len(cited_contexts))
+
+    # 1) cited_contexts 可能有多條 → 合併成一個 premise
+    premise = "\n\n".join(cited_contexts).strip()
+    print("premise_len_chars:", len(premise))
+    print("premise_preview:", premise[:120].replace("\n", " "))
+
+    # 2) 如果還是空，fallback 用全部 expanded_docs
+    if not premise and context:
+        premise = context.strip()
+
+    print("premise_len:", len(premise))
+
+    if premise:
+        best_nli = compute_nli_score(premise, answer)
+    else:
+        best_nli = {
+            "entailment": 0.0,
+            "neutral": 0.0,
+            "contradiction": 0.0,
+            "factuality": 0.0,
+            "C_fact": 0.0
+        }
+
+    C_conf = round(
+        (coverage_score ** alpha) *
+        (best_nli["C_fact"] ** beta),
+        4
+    )
+
+    output = {
         "points": fixed_points,
-        "信心分數": confidence
+        "coverage_score": coverage_score,
+        "nli": best_nli,
+        "C_conf": C_conf
     }
-    return json.dumps(out, ensure_ascii=False)
 
-# === tool #4：修改 query ===
-def query_expanding_metrics(query: str, context: str, answer: str) -> str:
-    chain = query_expanding_prompt | client
-    result_msg = chain.invoke({
-        "query": query,
-        "context": context,
-        "answer": answer
-    })
-    return result_msg.content.strip()
+    return json.dumps(output, ensure_ascii=False)
 
-def keyword_retriever_tool(query: str, keywords: List[str], k: int = 8) -> dict:
-    """
-    用 keyword_based_retriever（BM25）做關鍵字檢索。僅回傳前 k 篇原始命中文件（不 expand）。
-    """
-    prod_id = extract_prod_id_from_query(query)
-    if not prod_id:
-        return {"error": "❌ 無法判斷產品名稱"}
 
-    vectorstore = build_vectorstore(prod_id)
-    matched_docs = keyword_based_retriever(vectorstore, query, keywords, top_k=k)
-
-    if not matched_docs:
-        return {"warning": "⚠️ 關鍵字檢索未命中任何條文內容", "docs": [], "context": ""}
-
-    print("\n========== [Keyword Retrieved Docs (raw)] ==========")
-    for i, d in enumerate(matched_docs):
-        print(f"[{i}] CHUNK_ID={d.metadata.get('CHUNK_ID')}\n{d.page_content}\n")
-
-    return pack_docs(matched_docs, max_docs=k)
-
-# === tool #0：Information Need Tool（將問題拆成知識點清單） ===
+# === information Need Tool（將問題拆成知識點清單） ===
 def information_need_tool(query: str) -> dict:
     """
     依據使用者問題，產出回答該問題所需的 Information Needs 清單。
@@ -271,135 +377,156 @@ def information_need_tool(query: str) -> dict:
 
     return {"info_needs": cleaned}
 
-# --- 新增：語意檢索（只檢索，不 expand、不生成） ---
-def semantic_retriever_tool(query: str, threshold: float = 0.3, k: int = 8) -> dict:
+#  ===  語意檢索  === 
+Difficulty = Literal["easy", "hard"]
+def retrieve_process_tool(
+    query: str,
+    product_id: Optional[str] = None,
+    difficulty: Difficulty = "easy",
+    threshold: float = 0.3,
+    is_react: bool = False,
+    # 初始檢索規格
+    k_retrieve_easy: int = 5,
+    k_retrieve_hard: int = 8,
+    # reAct 檢索規格
+    k_retrieve_react: int = 10,
+    top_k_rerank: int = 5,
+    # expand cap
+    max_expand_easy: int = 10,
+    max_expand_hard: int = 15,
+) -> dict:
     """
-    用 FilteredRetriever 做語意檢索。僅回傳前 k 篇原始命中文件（不 expand）。
-    回傳格式：
+    單一入口：依 difficulty 決定流程
+    - easy: retrieve 5 -> no rerank -> expand -> cap 10
+    - hard: retrieve 8 -> rerank(top_k=5) -> expand -> cap 15
+
+    回傳格式（統一）：
     {
-      "docs": [{"doc_id","text","meta"}, ...],   # 命中文件清單
-      "context": "text1\n---\ntext2..."          # 直接拼接（僅供檢視；後續會重排）
+      "retrieved_docs": [...],     # raw retrieved（pack_docs 的 docs）
+      "scored_docs": [...],        # rerank 後 top docs（easy 空）
+      "expanded_docs": [...],      # 最終餵給 LLM 的 docs（cap 後）
+      "context": "..."             # expanded_docs 拼接的 context
     }
     """
-    prod_id = extract_prod_id_from_query(query)
+    # note: 可以刪掉 scored_docs
+
+    # -----------------------
+    # 0) decide params
+    # -----------------------
+    # if difficulty == "easy":
+    #     k_retrieve = k_retrieve_easy
+    #     max_expand = max_expand_easy
+    #     do_rerank = False
+    #     top_k_rerank = 0
+    # else:
+    #     k_retrieve = k_retrieve_hard
+    #     max_expand = max_expand_hard
+    #     do_rerank = True
+    #     top_k_rerank = top_k_rerank_hard
+    if is_react:
+        # reAct 規格（你指定）
+        k_retrieve = k_retrieve_react
+        do_rerank = True
+        max_expand = max_expand_hard
+    else:
+        # 初始檢索（維持你原本規格）
+        if difficulty == "easy":
+            k_retrieve = k_retrieve_easy       # 5
+            max_expand = max_expand_easy       # 10
+            do_rerank = False
+        else:
+            k_retrieve = k_retrieve_hard       # 8
+            max_expand = max_expand_hard       # 15
+            do_rerank = True
+
+    prod_id = product_id or extract_prod_id_from_query(query)
     if not prod_id:
         return {"error": "❌ 無法判斷產品名稱"}
 
     vectorstore = build_vectorstore(prod_id)
-    retriever = FilteredRetriever(vectorstore=vectorstore, threshold=threshold, k=k)
-    retrieved_docs = retriever.invoke(query)  # List[Document]，原始命中
 
-    print("\n========== [Semantic Retrieved Docs (raw)] ==========")
+    # -----------------------
+    # 1) semantic retrieve (raw)
+    # -----------------------
+    retriever = FilteredRetriever(vectorstore=vectorstore, threshold=threshold, k=k_retrieve)
+    retrieved_docs = retriever.invoke(query)
+    if not retrieved_docs:
+        retrieved_docs = vectorstore.similarity_search(query, k=k_retrieve)
+
+    print(f"\n========== [Semantic Retrieved Docs (raw) | {difficulty}] ==========")
     for i, d in enumerate(retrieved_docs):
         print(f"[{i}] CHUNK_ID={d.metadata.get('CHUNK_ID')}\n{d.page_content}\n")
 
-    return pack_docs(retrieved_docs, max_docs=k)
+    retrieved_packed = pack_docs(retrieved_docs, max_docs=k_retrieve)
+    docs_in = retrieved_packed.get("docs", [])
 
-
-# --- 新增：重排工具（取 3 篇，再 expand） ---
-def grade_documents_tool(query: str, retrieved, top_k: int = 3) -> dict:
-    # 1) 解析 retrieved
-    def _coerce_to_dict(obj):
-        # 已是 dict：直接回傳
-        if isinstance(obj, dict):
-            return obj
-        # 期望是 JSON 字串
-        if not isinstance(obj, str):
-            return {}
-        s = obj.strip()
-
-        # 1) 先嘗試原生 loads
-        try:
-            return json.loads(s)
-        except Exception:
-            pass
-
-        # 2) 用「括號平衡」從第一個 '{' 找到正好配平的結尾
-        start = s.find('{')
-        if start == -1:
-            return {}
-
-        depth = 0
-        end = -1
-        for i in range(start, len(s)):
-            ch = s[i]
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-
-        if end != -1:
-            candidate = s[start:end+1]
-            try:
-                return json.loads(candidate)
-            except Exception:
-                pass
-
-        # 3) 退而求其次：再試一次「到最後一個 '}]' 的位置」的切法
-        try:
-            last_close = s.rfind('}]')
-            if last_close != -1:
-                candidate = s[start:last_close+2]  # 包含 '}]'
-                return json.loads(candidate)
-        except Exception:
-            pass
-
-        # 4) 都不行就回空 dict
-        return {}
-
-
-    retrieved_dict = _coerce_to_dict(retrieved)
-    docs_in = retrieved_dict.get("docs", []) if isinstance(retrieved_dict, dict) else []
     if not docs_in:
-        return {"scored_docs": [], "expanded_docs": [], "context": "", "warning": "retrieved 空或缺少 docs"}
+        return {
+            "retrieved_docs": [],
+            "expanded_docs": [],
+            "context": "",
+            "warning": "retrieved 空或缺少 docs"
+        }
 
-    # 2) 用 BGE Reranker（cross-encoder）重排
-    #    說明：輸入 (query, doc) 配對，輸出每篇 doc 的相關性分數（已可直接排序）
-    pairs = [[query, d["text"]] for d in docs_in]
-    try:
-        # normalize=True 會把分數做範圍正規化，排序更穩定
-        scores = reranker.compute_score(pairs, normalize=True)
-    except Exception as e:
-        return {"scored_docs": [], "expanded_docs": [], "context": "", "error": f"reranker 失敗：{e}"}
+    # -----------------------
+    # 2) optional rerank (hard only)
+    # -----------------------
+    if do_rerank:
+        pairs = [[query, d["text"]] for d in docs_in]
+        try:
+            scores = reranker.compute_score(pairs, normalize=True)
+        except Exception as e:
+            return {
+                "retrieved_docs": docs_in,
+                "expanded_docs": [],
+                "context": "",
+                "error": f"reranker 失敗：{e}"
+            }
 
-    scored = []
-    for d, s in zip(docs_in, scores):
-        e = dict(d)
-        e["score"] = float(s)
-        scored.append(e)
+        scored = []
+        for d, s in zip(docs_in, scores):
+            e = dict(d)
+            e["score"] = float(s)
+            scored.append(e)
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    top = scored[:max(1, min(top_k, len(scored)))]
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        top = scored[:max(1, min(top_k_rerank, len(scored)))]
 
-    print("\n========== [Reranked Top Docs - BGE v2-m3] ==========")
-    for i, d in enumerate(top):
-        cid = d.get('meta', {}).get('CHUNK_ID')
-        print(f"[{i}] score={d['score']:.3f} CHUNK_ID={cid}\n{d['text']}\n")
+        print("\n========== [Reranked Top Docs - BGE v2-m3 | hard] ==========")
+        for i, d in enumerate(top):
+            cid = d.get("meta", {}).get("CHUNK_ID")
+            print(f"[{i}] score={d['score']:.3f} CHUNK_ID={cid}\n{d['text']}\n")
 
-    # 3) 以 top_k 重建 Document，做 expand
-    prod_id = extract_prod_id_from_query(query)
-    vectorstore = build_vectorstore(prod_id) if prod_id else None
-    base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in top]
-    expanded_docs = expand_retrieved_chunks_v2(vectorstore, base_docs) if vectorstore else base_docs
+        base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in top]
+    else:
+        # easy: 不 rerank，直接用原順序
+        base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in docs_in]
 
-    # 4) 打包 expand 後的 docs 與 context
-    packed = pack_docs(expanded_docs, max_docs=8)
-    print("\n========== [Expanded Docs After Rerank] ==========")
+
+    # -----------------------
+    # 3) expand + cap
+    # -----------------------
+    expanded_docs = expand_retrieved_chunks_v2(vectorstore, base_docs)
+
+    if len(expanded_docs) > max_expand:
+        expanded_docs = expanded_docs[:max_expand] 
+
+    packed = pack_docs(expanded_docs, max_docs=max_expand)
+
+    print(f"\n========== [Expanded Docs | cap={max_expand} | {difficulty}] ==========")
     for i, d in enumerate(packed["docs"]):
-        cid = d.get('meta', {}).get('CHUNK_ID')
+        cid = d.get("meta", {}).get("CHUNK_ID")
         print(f"[{i}] CHUNK_ID={cid}\n{d['text']}\n")
 
     return {
-        "scored_docs": top,
+        "retrieved_docs": docs_in,
         "expanded_docs": packed["docs"],
         "context": packed["context"],
     }
 
 
-def generate_answer_tool(query: str, context: str) -> dict:
+#  ===  答案生成工具  === 
+def generate_answer_tool(query: str, context: str, info_points=None) -> dict:    
     """
     只負責依 context 生成答案（不做檢索與重排）
     回傳：{"answer": "...", "context": context}
@@ -408,7 +535,50 @@ def generate_answer_tool(query: str, context: str) -> dict:
     if not ctx:
         return {"answer": "找不到相關內容", "context": ""}
 
+    try:
+        if info_points:
+            info_points_str = json.dumps(info_points, ensure_ascii=False, indent=2)
+        else:
+            info_points_str = "[]"
+    except Exception:
+        info_points_str = "[]"
+
     chain = prompt | client
-    result_msg = chain.invoke({"context": ctx, "query": query})
+    result_msg = chain.invoke({"context": ctx, "query": query, "info_points": info_points_str})
     answer = result_msg.content.strip()
     return {"answer": answer, "context": ctx}
+
+#  ===  修正答案生成工具  === 
+def revise_answer_tool(
+    query: str,
+    prev_answer: str,
+    weakness_type,
+    low_keypoints,
+    context: str
+) -> dict:
+    """
+    重新生成答案（修正版）
+    """
+
+    # weakness_type → 轉成字串
+    if isinstance(weakness_type, list):
+        weakness_str = json.dumps(weakness_type, ensure_ascii=False)
+    else:
+        weakness_str = str(weakness_type)
+
+    # low_keypoints → JSON 字串
+    try:
+        low_kp_str = json.dumps(low_keypoints or [], ensure_ascii=False)
+    except Exception:
+        low_kp_str = "[]"
+
+    chain = answer_revision_prompt | client
+    result_msg = chain.invoke({
+        "query": (query or "").strip(),
+        "prev_answer": (prev_answer or "").strip(),
+        "weakness_type": weakness_str,
+        "low_keypoints": low_kp_str,
+        "retrieved_docs": context  # ← 已經是文字
+    })
+
+    return {"answer": result_msg.content.strip()}

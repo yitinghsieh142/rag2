@@ -1,15 +1,14 @@
 import os
 import json
 import numpy as np
-from typing import List, Set, Tuple, Optional
+import re
+from typing import Dict, List, Set, Tuple, Optional
 from langchain.schema import Document, BaseRetriever
 from pydantic import Field
 from langchain_chroma import Chroma
 from langchain.chains import RetrievalQA
 from langchain.chains import LLMChain
 from langchain_core.runnables import RunnableLambda
-import jieba
-from rank_bm25 import BM25Okapi
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
@@ -55,17 +54,7 @@ def load_softlink_mapping(prod_id: str) -> dict:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-# === 擴展 retrieved sections 對應的 appendix ===
-def get_softlinked_appendix_titles(vectorstore, softlink_map: dict, retrieved_chunk_ids: Set[int]) -> List[Tuple[int, str]]:
-    appendix_ids = [int(aid) for aid, sections in softlink_map.items() if any(sec in retrieved_chunk_ids for sec in sections)]
-    result = []
-    for aid in appendix_ids:
-        docs = vectorstore.get(where={"CHUNK_ID": aid}, include=["documents", "metadatas"])
-        for content, meta in zip(docs["documents"], docs["metadatas"]):
-            title = meta.get("TITLE", "")
-            result.append((aid, title))
-    return result
+    
 
 # === group / appendix 擴展 ===
 def expand_retrieved_chunks_v2(vectorstore, retrieved_docs: List[Document]) -> List[Document]:
@@ -91,7 +80,6 @@ def expand_retrieved_chunks_v2(vectorstore, retrieved_docs: List[Document]) -> L
             # 只有 section 才擴展
             if isinstance(group, str):
                 group_set.add(group)
-                print("hihi")
             if isinstance(related_appendix, int):
                 appendix_chunk_ids.add(related_appendix)
     
@@ -146,39 +134,8 @@ def build_retrieval_qa_chain(client, docs: List[Document], prompt_template):
 
     return RunnableLambda(invoke_fn) # 回傳 callable
 
-# === Keyword-based retriever ===
-def keyword_based_retriever(vectorstore: Chroma, query: str, keywords: List[str], top_k: int = 8) -> List[Document]:
-    seen_chunk_ids = set()
-    all_chunks = vectorstore.get(include=["documents", "metadatas"])
 
-    # 預處理文本與分詞
-    corpus = []
-    doc_list = []
-    for content, meta in zip(all_chunks["documents"], all_chunks["metadatas"]):
-        tokens = list(jieba.cut(content))
-        corpus.append(tokens)
-        doc_list.append(Document(page_content=content, metadata=meta))
-
-    # 用 query 的關鍵字分詞當作查詢
-    tokenized_query = keywords  # 若已分好詞，可直接用
-
-    bm25 = BM25Okapi(corpus)
-    scores = bm25.get_scores(tokenized_query)
-
-    # 排序後取前 k 筆，避免重複 chunk
-    doc_scores = sorted(zip(doc_list, scores), key=lambda x: x[1], reverse=True)
-    matched_docs = []
-    for doc, _ in doc_scores:
-        cid = doc.metadata.get("CHUNK_ID")
-        if cid not in seen_chunk_ids:
-            matched_docs.append(doc)
-            seen_chunk_ids.add(cid)
-            if len(matched_docs) >= top_k:
-                break
-
-    return matched_docs
-
-# --- 新增：共用小工具（打包 docs 與 context） ---
+# --- 共用小工具（打包 docs 與 context） ---
 def pack_docs(docs: List[Document], max_docs: int = 8) -> dict:
     items = []
     for d in docs[:max_docs]:

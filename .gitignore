@@ -4,6 +4,11 @@
 # LangChain / Chroma vector DB
 chroma_db/
 
+# model 跟其他 output folder
+models/
+output/
+soft_links_output
+
 # 虛擬環境
 venv/chroma_db/
 venv/
