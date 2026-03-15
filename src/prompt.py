@@ -17,7 +17,7 @@ If Information Points are provided, you should use them as a checklist of what t
 ###Critical Rules###
 1. You MUST only use information from the provided context.
 2. You MUST clearly indicate which specific clause snippet supports your answer.
-3. In the "條文依據" section, you MUST cite the corresponding CHUNK_ID exactly as shown in the context.
+3. In the "條文依據" section, you MUST cite the corresponding clause title exactly as shown in the context.
 4. Citation format must follow exactly:
    - [Title]
 5. For exclusion clauses, exceptions, or proviso-style clauses（如「不在此限」）, your answer must follow the clause logic faithfully:
@@ -74,7 +74,7 @@ Example Answer:
 
 prompt = PromptTemplate(
     template=rag_prompt_template,
-    input_variables=["context", "query"]
+    input_variables=["context", "query", "info_points"]
 )
 
 # 指標評分 prompt
