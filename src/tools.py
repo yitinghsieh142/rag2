@@ -382,63 +382,24 @@ Difficulty = Literal["easy", "hard"]
 def retrieve_process_tool(
     query: str,
     product_id: Optional[str] = None,
-    difficulty: Difficulty = "easy",
     threshold: float = 0.3,
-    is_react: bool = False,
     # 初始檢索規格
-    k_retrieve_easy: int = 5,
-    k_retrieve_hard: int = 8,
-    # reAct 檢索規格
-    k_retrieve_react: int = 10,
-    top_k_rerank: int = 5,
-    # expand cap
-    max_expand_easy: int = 10,
-    max_expand_hard: int = 15,
+    k_retrieve: int = 5,
+    max_expand: int = 10,
 ) -> dict:
     """
-    單一入口：依 difficulty 決定流程
-    - easy: retrieve 5 -> no rerank -> expand -> cap 10
-    - hard: retrieve 8 -> rerank(top_k=5) -> expand -> cap 15
+    Basic RAG with expansion:
+    - 單次 semantic retrieve
+    - 保留 expand
+    - 不做 difficulty / rerank / reAct
 
-    回傳格式（統一）：
+    回傳格式：
     {
-      "retrieved_docs": [...],     # raw retrieved（pack_docs 的 docs）
-      "scored_docs": [...],        # rerank 後 top docs（easy 空）
-      "expanded_docs": [...],      # 最終餵給 LLM 的 docs（cap 後）
-      "context": "..."             # expanded_docs 拼接的 context
+      "retrieved_docs": [...],
+      "expanded_docs": [...],
+      "context": "..."
     }
     """
-    # note: 可以刪掉 scored_docs
-
-    # -----------------------
-    # 0) decide params
-    # -----------------------
-    # if difficulty == "easy":
-    #     k_retrieve = k_retrieve_easy
-    #     max_expand = max_expand_easy
-    #     do_rerank = False
-    #     top_k_rerank = 0
-    # else:
-    #     k_retrieve = k_retrieve_hard
-    #     max_expand = max_expand_hard
-    #     do_rerank = True
-    #     top_k_rerank = top_k_rerank_hard
-    if is_react:
-        # reAct 規格（你指定）
-        k_retrieve = k_retrieve_react
-        do_rerank = True
-        max_expand = max_expand_hard
-    else:
-        # 初始檢索（維持你原本規格）
-        if difficulty == "easy":
-            k_retrieve = k_retrieve_easy       # 5
-            max_expand = max_expand_easy       # 10
-            do_rerank = False
-        else:
-            k_retrieve = k_retrieve_hard       # 8
-            max_expand = max_expand_hard       # 15
-            do_rerank = True
-
     prod_id = product_id or extract_prod_id_from_query(query)
     if not prod_id:
         return {"error": "❌ 無法判斷產品名稱"}
@@ -453,7 +414,7 @@ def retrieve_process_tool(
     if not retrieved_docs:
         retrieved_docs = vectorstore.similarity_search(query, k=k_retrieve)
 
-    print(f"\n========== [Semantic Retrieved Docs (raw) | {difficulty}] ==========")
+    print(f"\n========== [Semantic Retrieved Docs (raw) | Vanilla RAG] ==========")
     for i, d in enumerate(retrieved_docs):
         print(f"[{i}] CHUNK_ID={d.metadata.get('CHUNK_ID')}\n{d.page_content}\n")
 
@@ -469,51 +430,16 @@ def retrieve_process_tool(
         }
 
     # -----------------------
-    # 2) optional rerank (hard only)
+    # 2) expand + cap
     # -----------------------
-    if do_rerank:
-        pairs = [[query, d["text"]] for d in docs_in]
-        try:
-            scores = reranker.compute_score(pairs, normalize=True)
-        except Exception as e:
-            return {
-                "retrieved_docs": docs_in,
-                "expanded_docs": [],
-                "context": "",
-                "error": f"reranker 失敗：{e}"
-            }
-
-        scored = []
-        for d, s in zip(docs_in, scores):
-            e = dict(d)
-            e["score"] = float(s)
-            scored.append(e)
-
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        top = scored[:max(1, min(top_k_rerank, len(scored)))]
-
-        print("\n========== [Reranked Top Docs - BGE v2-m3 | hard] ==========")
-        for i, d in enumerate(top):
-            cid = d.get("meta", {}).get("CHUNK_ID")
-            print(f"[{i}] score={d['score']:.3f} CHUNK_ID={cid}\n{d['text']}\n")
-
-        base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in top]
-    else:
-        # easy: 不 rerank，直接用原順序
-        base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in docs_in]
-
-
-    # -----------------------
-    # 3) expand + cap
-    # -----------------------
-    expanded_docs = expand_retrieved_chunks_v2(vectorstore, base_docs)
+    expanded_docs = expand_retrieved_chunks_v2(vectorstore, retrieved_docs)
 
     if len(expanded_docs) > max_expand:
         expanded_docs = expanded_docs[:max_expand] 
 
     packed = pack_docs(expanded_docs, max_docs=max_expand)
 
-    print(f"\n========== [Expanded Docs | cap={max_expand} | {difficulty}] ==========")
+    print(f"\n========== [Expanded Docs | cap={max_expand} | Vanilla RAG] ==========")
     for i, d in enumerate(packed["docs"]):
         cid = d.get("meta", {}).get("CHUNK_ID")
         print(f"[{i}] CHUNK_ID={cid}\n{d['text']}\n")
@@ -528,23 +454,20 @@ def retrieve_process_tool(
 #  ===  答案生成工具  === 
 def generate_answer_tool(query: str, context: str, info_points=None) -> dict:    
     """
-    只負責依 context 生成答案（不做檢索與重排）
+    Vanilla RAG:
+    只根據 context 單次生成答案，不使用 info_points / evaluator / revise。
     回傳：{"answer": "...", "context": context}
     """
     ctx = (context or "").strip()
     if not ctx:
         return {"answer": "找不到相關內容", "context": ""}
 
-    try:
-        if info_points:
-            info_points_str = json.dumps(info_points, ensure_ascii=False, indent=2)
-        else:
-            info_points_str = "[]"
-    except Exception:
-        info_points_str = "[]"
 
     chain = prompt | client
-    result_msg = chain.invoke({"context": ctx, "query": query, "info_points": info_points_str})
+    result_msg = chain.invoke({
+        "context": ctx,
+        "query": query,
+    })
     answer = result_msg.content.strip()
     return {"answer": answer, "context": ctx}
 
