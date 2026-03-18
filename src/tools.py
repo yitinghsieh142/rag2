@@ -384,14 +384,11 @@ def retrieve_process_tool(
     product_id: Optional[str] = None,
     difficulty: Difficulty = "easy",
     threshold: float = 0.3,
-    is_react: bool = False,
     # 初始檢索規格
     k_retrieve_easy: int = 5,
     k_retrieve_hard: int = 8,
-    # reAct 檢索規格
-    k_retrieve_react: int = 10,
-    top_k_rerank: int = 5,
     # expand cap
+    top_k_rerank: int = 5,
     max_expand_easy: int = 10,
     max_expand_hard: int = 15,
 ) -> dict:
@@ -400,44 +397,21 @@ def retrieve_process_tool(
     - easy: retrieve 5 -> no rerank -> expand -> cap 10
     - hard: retrieve 8 -> rerank(top_k=5) -> expand -> cap 15
 
-    回傳格式（統一）：
+    回傳格式：
     {
-      "retrieved_docs": [...],     # raw retrieved（pack_docs 的 docs）
-      "scored_docs": [...],        # rerank 後 top docs（easy 空）
-      "expanded_docs": [...],      # 最終餵給 LLM 的 docs（cap 後）
-      "context": "..."             # expanded_docs 拼接的 context
+      "retrieved_docs": [...],
+      "expanded_docs": [...],
+      "context": "..."
     }
     """
-    # note: 可以刪掉 scored_docs
-
-    # -----------------------
-    # 0) decide params
-    # -----------------------
-    # if difficulty == "easy":
-    #     k_retrieve = k_retrieve_easy
-    #     max_expand = max_expand_easy
-    #     do_rerank = False
-    #     top_k_rerank = 0
-    # else:
-    #     k_retrieve = k_retrieve_hard
-    #     max_expand = max_expand_hard
-    #     do_rerank = True
-    #     top_k_rerank = top_k_rerank_hard
-    if is_react:
-        # reAct 規格（你指定）
-        k_retrieve = k_retrieve_react
-        do_rerank = True
-        max_expand = max_expand_hard
+    if difficulty == "easy":
+        k_retrieve = k_retrieve_easy
+        max_expand = max_expand_easy
+        do_rerank = False
     else:
-        # 初始檢索（維持你原本規格）
-        if difficulty == "easy":
-            k_retrieve = k_retrieve_easy       # 5
-            max_expand = max_expand_easy       # 10
-            do_rerank = False
-        else:
-            k_retrieve = k_retrieve_hard       # 8
-            max_expand = max_expand_hard       # 15
-            do_rerank = True
+        k_retrieve = k_retrieve_hard
+        max_expand = max_expand_hard
+        do_rerank = True
 
     prod_id = product_id or extract_prod_id_from_query(query)
     if not prod_id:
@@ -535,16 +509,8 @@ def generate_answer_tool(query: str, context: str, info_points=None) -> dict:
     if not ctx:
         return {"answer": "找不到相關內容", "context": ""}
 
-    try:
-        if info_points:
-            info_points_str = json.dumps(info_points, ensure_ascii=False, indent=2)
-        else:
-            info_points_str = "[]"
-    except Exception:
-        info_points_str = "[]"
-
     chain = prompt | client
-    result_msg = chain.invoke({"context": ctx, "query": query, "info_points": info_points_str})
+    result_msg = chain.invoke({"context": ctx, "query": query})
     answer = result_msg.content.strip()
     return {"answer": answer, "context": ctx}
 
