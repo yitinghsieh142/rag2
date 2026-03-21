@@ -1,20 +1,19 @@
 # src/main_graph.py
-# LangGraph版：依照你的流程圖（綠=easy, 紅=hard）
-# - easy：Difficulty -> Semantic+Keyword(僅語意為主) -> Rerank+Expand -> Answer -> Eval -> END
-# - hard：Difficulty -> InfoNeed -> HybridRetriever(語意/關鍵字) -> Rerank+Expand -> Answer -> Eval
-#         -> 若 must-have coverage < threshold：Rewrite(摘要+擴寫+建議semantic/keyword) -> 回到 HybridRetriever（最多3輪）
-#
-# 你現有 tools.py / utils.py 幾乎不動，只是把「控制流」搬到 LangGraph。
-#
-# 需求：
-# pip install langgraph
+# LangGraph版：coverage branch
+# 流程：
+# query
+# -> difficulty estimator
+# -> hard: information analyzer
+# -> easy / hard different retrieval strategies
+# -> answer generate
+# -> answer evaluation (coverage only; no factual)
+# -> output or reAct
 #
 # 執行：
 # cd src
 # python3 main_graph.py
 
 import os
-import re
 import json
 from typing import TypedDict, Optional, List, Dict, Any, Literal
 
@@ -24,7 +23,7 @@ from langchain.schema import Document
 
 from langgraph.graph import StateGraph, START, END
 
-from utils import extract_prod_id_from_query, pack_docs
+from utils import pack_docs
 
 from tools import (
     information_need_tool,
@@ -32,7 +31,6 @@ from tools import (
     generate_answer_tool,
     evaluate_answer_metrics,      
     revise_answer_tool,
-
 )
 from difficulty import predict_difficulty
 from result_logger import append_graph_result_to_excel
@@ -82,19 +80,13 @@ class GraphState(TypedDict, total=False):
     eval: Dict[str, Any]                    # eval_raw parse 成 dict
     confidence: float                       # evaluator 給的信心分數（你目前是 C_conf 或 信心分數）
     must_failed: bool                       # coverage 是否有 must-have < threshold
-    factual_failed: bool                    # factual 是否 < threshold
     low_keypoints: List[Dict[str, Any]]     # must-have 低分 keypoints（points 裡挑出來的）
-    weakness_types: List[Literal["coverage","factual"]]  # 可能同時包含 coverage/factual
 
     # reAct Evidence Accumulation / Flags
     prev_expanded_docs: List[Dict[str, Any]]  # 上一輪（或累積後）的 expanded_docs，用於合併證據
     is_react_retrieval: bool                  # 這一輪 retrieve 是否用 reAct 規格(top10/rerank5/expand)
     react_after_retrieve: bool                # retrieve 後是否直接走 revise（跳過 generate）
 
-    # (Legacy) Rewrite-related fields (目前你已不主要用到)
-    # route: Literal["semantic", "keyword"]
-    # keywords: List[str]
-    # extra_context: str
 
     # Debug / Logs
     logs: List[str]                           # debug 用 log list
@@ -161,9 +153,7 @@ def n_init(state: GraphState) -> GraphState:
     state["eval_raw"] = ""
     state["confidence"] = 0.0
     state["must_failed"] = False
-    state["factual_failed"] = False
     state["low_keypoints"] = []
-    state["weakness_types"] = []
 
     # 重置 logs（避免跨 query 累積）
     state["logs"] = []
@@ -271,37 +261,16 @@ def n_evaluate(state: GraphState) -> GraphState:
                 continue
     must_failed = len(low_kps) > 0
 
-    # factual: 取 nli.C_fact < 0.8
-    factual_failed = False
-    try:
-        nli = obj.get("nli", {}) or {}
-        C_fact = float(nli.get("C_fact", nli.get("factuality", 0.0)))
-        factual_failed = C_fact < 0.8
-    except Exception:
-        factual_failed = False
-
     # write back to state
     state["low_keypoints"] = low_kps
     state["must_failed"] = must_failed
-    state["factual_failed"] = factual_failed
-
-    # weakness_types（可同時存在）
-    weakness = []
-    if must_failed:
-        weakness.append("coverage")
-    if factual_failed:
-        weakness.append("factual")
         
-    state["weakness_types"] = weakness
-
     print("\n========== [Evaluation Result] ==========")
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
     print("\n========== [Eval Summary] ==========")
     print(f"must_failed: {must_failed}")
-    print(f"factual_failed: {factual_failed}")
     print(f"low_keypoints_count: {len(low_kps)}")
-    print(f"weakness_types: {weakness}")
 
     return state
 
@@ -386,10 +355,9 @@ def n_revise_answer(state: GraphState) -> GraphState:
     """
     state["round"] = int(state.get("round", 0)) + 1
 
-    weakness = state.get("weakness_types", []) or []
     low_kps = state.get("low_keypoints", []) or []
 
-    _log(state, f"✍️ revise_answer：weakness={weakness} | low_kps={len(low_kps)}")
+    _log(state, f"✍️ revise_answer：coverage_only | low_kps={len(low_kps)}")
 
     # 取得舊 + 新文件
     old_docs = state.get("prev_expanded_docs", []) or []
@@ -397,13 +365,17 @@ def n_revise_answer(state: GraphState) -> GraphState:
 
     # 用 CHUNK_ID 去重合併
     merged = {}
+    no_id_docs = []
+
     for d in old_docs + new_docs:
         meta = d.get("meta", {}) or {}
         cid = meta.get("CHUNK_ID")
-        if cid is not None and cid not in merged:
+        if cid is None:
+            no_id_docs.append(d)
+        elif cid not in merged:
             merged[cid] = d
 
-    merged_docs = list(merged.values())
+    merged_docs = list(merged.values()) + no_id_docs
 
     # 若沒有文件，直接返回原答案
     if not merged_docs:
@@ -423,7 +395,7 @@ def n_revise_answer(state: GraphState) -> GraphState:
     out = revise_answer_tool(
         query=state.get("query_original", ""),
         prev_answer=state.get("answer", ""),
-        weakness_type=weakness,
+        weakness_type=["coverage"],
         low_keypoints=low_kps,
         context=merged_context
     )
@@ -505,10 +477,9 @@ def r_after_eval(state: GraphState) -> str:
     # factual failed（但 coverage OK）→ 不需要檢索，直接 revise_answer
     # 都 OK → finalize
     must_failed = bool(state.get("must_failed", False))
-    factual_failed = bool(state.get("factual_failed", False))
 
     # 若都沒問題，直接結束
-    if not must_failed and not factual_failed:
+    if not must_failed:
         return "finalize"
 
     # 只要還需要修正，就先檢查是否已達上限
@@ -516,16 +487,8 @@ def r_after_eval(state: GraphState) -> str:
         print("答案可能不完全可信")
         return "finalize"
 
-    # coverage fail 優先：需要先重新檢索
-    if must_failed:
-        return "prepare_react_query"
-
-    # 只有 factual fail：直接 revise
-    if factual_failed:
-        return "revise_answer"
-
     # 3) ok
-    return "finalize"
+    return "prepare_react_query"
 
 
 # ---------------------------
@@ -586,7 +549,6 @@ def build_app():
         r_after_eval,
         {
             "prepare_react_query": "prepare_react_query",
-            "revise_answer": "revise_answer",
             "finalize": "finalize",
         }
     )

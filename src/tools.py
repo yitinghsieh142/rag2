@@ -24,8 +24,6 @@ from utils import (
     pack_docs,
 )
 
-from test_nli import compute_nli_score
-
 from prompt import prompt, answer_evaluation_prompt, query_expanding_prompt, information_need_prompt, answer_revision_prompt
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -60,36 +58,21 @@ def evaluate_answer_metrics(
     expanded_docs,
     context: str = "",
     difficulty: str = "hard",
-    alpha: float = 1.0,
-    beta: float = 0.6,
 ) -> str:
     """
-    Answer Evaluator (Coverage + NLI Factuality)
+    Answer Evaluator (Coverage only)
 
     Coverage:
       - 由 answer_evaluation_prompt (LLM) 針對 info points 打分 (0~1)
       - must_have=True 權重 0.8；False 權重 0.2
       - 得到 coverage_score ∈ [0,1]
 
-    NLI Factuality:
-      - 呼叫 compute_nli_score()
-      - 直接使用回傳的 C_fact ∈ [0,1]
-
-
-    Final:
-      - C_conf = (coverage_score^alpha) * (C_fact^beta)
-
     回傳 JSON 字串：
     {
       "points": [...],
       "coverage_score": 0.xx,
-      "nli": {
-        "probs": {"entailment":..., "neutral":..., "contradiction":...},
-        "factuality": ...,
-        "C_fact": ...
-      },
       "C_conf": ...,
-      "信心分數": ...   # 為了相容舊版 key
+      "信心分數": ...
     }
     """
 
@@ -218,98 +201,11 @@ def evaluate_answer_metrics(
         total_ws += w * s
     # confidence = round((total_ws / total_w) if total_w > 0 else 0.0, 4)
     coverage_score = round(total_ws / total_w, 4) if total_w else 0.0
-
-
-    # 3 NLI factuality
-    def _extract_reference_block(answer: str) -> str:
-        if not isinstance(answer, str):
-            return ""
-        if "條文依據" not in answer:
-            return ""
-        return answer.split("條文依據", 1)[1].strip()
-
-    ref_block = _extract_reference_block(answer)
-
-    cited_articles = re.findall(r"第[一二三四五六七八九十百千0-9]+條", ref_block)
-    cited_articles = list(set(cited_articles))
-
-    # 是否包含「摘要」
-    SUMMARY_KEYWORDS = [
-        "摘要",
-        "內容摘要",
-        "條款摘要",
-        "條文摘要",
-        "重點摘要",
-        "說明",
-        "條款說明",
-        "概述",
-        "保障範圍",
-        "保障內容",
-        "附表"
-    ]
-    include_summary = any(k in ref_block for k in SUMMARY_KEYWORDS)
-
-    debug_cited_ids = []
-    if include_summary:
-        debug_cited_ids.append("摘要")
-    debug_cited_ids.extend(cited_articles)
-
-    print("\n========== [DEBUG expanded_docs] ==========")
-    print("cited_ids", cited_articles)
-
-    if not expanded_docs:
-        print("expanded_docs 是空的！")
-
-    cited_contexts = []
-
-    for d in (expanded_docs or []):
-        title, text = _get_doc_fields(d)
-
-        if not text.strip():
-            continue
-
-        # 若模型有寫條號 → 用條號比對 TITLE
-        if cited_articles:
-            if any(article in title for article in cited_articles):
-                cited_contexts.append(text)
-        else:
-            # 沒引用條號 → 使用全部 expanded_docs
-            cited_contexts.append(text)
-
-    print("matched_context_count:", len(cited_contexts))
-
-    # 1) cited_contexts 可能有多條 → 合併成一個 premise
-    premise = "\n\n".join(cited_contexts).strip()
-    print("premise_len_chars:", len(premise))
-    print("premise_preview:", premise[:120].replace("\n", " "))
-
-    # 2) 如果還是空，fallback 用全部 expanded_docs
-    if not premise and context:
-        premise = context.strip()
-
-    print("premise_len:", len(premise))
-
-    if premise:
-        best_nli = compute_nli_score(premise, answer)
-    else:
-        best_nli = {
-            "entailment": 0.0,
-            "neutral": 0.0,
-            "contradiction": 0.0,
-            "factuality": 0.0,
-            "C_fact": 0.0
-        }
-
-    C_conf = round(
-        (coverage_score ** alpha) *
-        (best_nli["C_fact"] ** beta),
-        4
-    )
+    C_conf = coverage_score
 
     output = {
         "points": fixed_points,
         "coverage_score": coverage_score,
-        "nli": best_nli,
         "C_conf": C_conf
     }
 
