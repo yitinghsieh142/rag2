@@ -14,7 +14,6 @@
 # python3 main_graph.py
 
 import os
-import re
 import json
 from typing import TypedDict, Optional, List, Dict, Any, Literal
 
@@ -24,10 +23,9 @@ from langchain.schema import Document
 
 from langgraph.graph import StateGraph, START, END
 
-from utils import extract_prod_id_from_query, pack_docs
+from utils import pack_docs
 
 from tools import (
-    information_need_tool,
     retrieve_process_tool,
     generate_answer_tool,
     evaluate_answer_metrics,      
@@ -65,9 +63,6 @@ class GraphState(TypedDict, total=False):
     max_rounds: int                         # reAct 最多幾輪
     round: int                              # 目前第幾輪 reAct（coverage 觸發才會 +1）
 
-    # InfoNeed (hard only)
-    info_needs: Any                         # information_need_tool 輸出（list[dict] 或 raw）
-    
     # Retrieval / Docs (after retrieve_process_tool)
     retrieved: Dict[str, Any]               # 原始檢索結果（可選，用於 debug/分析）
     graded: Dict[str, Any]                  # retrieve_process_tool 回傳整包（你目前用 graded 存）
@@ -81,20 +76,12 @@ class GraphState(TypedDict, total=False):
     eval_raw: str                           # evaluator 原始輸出（JSON string）
     eval: Dict[str, Any]                    # eval_raw parse 成 dict
     confidence: float                       # evaluator 給的信心分數（你目前是 C_conf 或 信心分數）
-    must_failed: bool                       # coverage 是否有 must-have < threshold
     factual_failed: bool                    # factual 是否 < threshold
-    low_keypoints: List[Dict[str, Any]]     # must-have 低分 keypoints（points 裡挑出來的）
-    weakness_types: List[Literal["coverage","factual"]]  # 可能同時包含 coverage/factual
+    weakness_types: List[Literal["factual"]] # 可能同時包含 coverage/factual
 
     # reAct Evidence Accumulation / Flags
     prev_expanded_docs: List[Dict[str, Any]]  # 上一輪（或累積後）的 expanded_docs，用於合併證據
     is_react_retrieval: bool                  # 這一輪 retrieve 是否用 reAct 規格(top10/rerank5/expand)
-    react_after_retrieve: bool                # retrieve 後是否直接走 revise（跳過 generate）
-
-    # (Legacy) Rewrite-related fields (目前你已不主要用到)
-    # route: Literal["semantic", "keyword"]
-    # keywords: List[str]
-    # extra_context: str
 
     # Debug / Logs
     logs: List[str]                           # debug 用 log list
@@ -149,7 +136,6 @@ def n_init(state: GraphState) -> GraphState:
     state["max_rounds"] = state.get("max_rounds", 2)
 
     # reAct 控制旗標
-    state["react_after_retrieve"] = False
     state["is_react_retrieval"] = False
     state["prev_expanded_docs"] = []
 
@@ -160,9 +146,7 @@ def n_init(state: GraphState) -> GraphState:
     state["eval"] = {}
     state["eval_raw"] = ""
     state["confidence"] = 0.0
-    state["must_failed"] = False
     state["factual_failed"] = False
-    state["low_keypoints"] = []
     state["weakness_types"] = []
 
     # 重置 logs（避免跨 query 累積）
@@ -177,12 +161,6 @@ def n_difficulty(state: GraphState) -> GraphState:
     d = predict_difficulty(state["query_original"])
     state["difficulty"] = d
     return _log(state, f"🧠 難易度判斷：{d}")
-
-def n_info_need(state: GraphState) -> GraphState:
-    # 針對 hard 問題拆解成 must/opt 知識點（easy 會略過這一步）
-    out = information_need_tool(state["query_current"])
-    state["info_needs"] = out.get("info_needs", out)
-    return state
 
 def n_retrieve_process(state: GraphState) -> GraphState:
     # 執行檢索流程（依 difficulty / reAct 狀態決定 retrieve 參數）
@@ -209,17 +187,9 @@ def n_retrieve_process(state: GraphState) -> GraphState:
     return state
 
 def n_generate(state: GraphState) -> GraphState:
-    # 使用目前的 context 生成答案
-    difficulty = state.get("difficulty", "easy")
-
-    info_points = []
-    if difficulty == "hard":
-        info_points = state.get("info_needs", []) or []
-
     out = generate_answer_tool(
         query=state["query_current"],
         context=state.get("context", ""),
-        info_points=info_points
     )
 
     state["answer"] = out.get("answer", "")
@@ -234,17 +204,11 @@ def n_generate(state: GraphState) -> GraphState:
 def n_evaluate(state: GraphState) -> GraphState:
     # 評估目前答案的品質（coverage + factuality），並決定是否需要 reAct 修正
 
-    difficulty = state.get("difficulty", "easy")
-
-    # easy 不用 info_need：直接傳空，tool 內會自動加 query 當 must-have
-    info_points = [] if difficulty == "easy" else state.get("info_needs", [])
-
     raw = evaluate_answer_metrics(
         query=state["query_original"],   
-        information_points=info_points,
         answer=state.get("answer", ""),
         expanded_docs=state.get("expanded_docs", []),
-        difficulty=difficulty
+        difficulty=state.get("difficulty", "easy")
     )
 
     # 保存 evaluator 原始輸出
@@ -257,19 +221,6 @@ def n_evaluate(state: GraphState) -> GraphState:
         state["confidence"] = float(obj.get("C_conf", obj.get("信心分數", 0.0)))
     except Exception:
         state["confidence"] = 0.0
-    
-    # coverage: 找出 must_have 且 分數 < 0.8 的 keypoints
-    low_kps = []
-    points = obj.get("points", []) or []
-
-    if isinstance(points, list):
-        for p in points:
-            try:
-                if p.get("must_have", True) and float(p.get("分數", 0.0)) < 0.8:
-                    low_kps.append(p)
-            except Exception:
-                continue
-    must_failed = len(low_kps) > 0
 
     # factual: 取 nli.C_fact < 0.8
     factual_failed = False
@@ -281,99 +232,17 @@ def n_evaluate(state: GraphState) -> GraphState:
         factual_failed = False
 
     # write back to state
-    state["low_keypoints"] = low_kps
-    state["must_failed"] = must_failed
     state["factual_failed"] = factual_failed
-
-    # weakness_types（可同時存在）
-    weakness = []
-    if must_failed:
-        weakness.append("coverage")
-    if factual_failed:
-        weakness.append("factual")
-        
-    state["weakness_types"] = weakness
+    state["weakness_types"] = ["factual"] if factual_failed else []
 
     print("\n========== [Evaluation Result] ==========")
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
     print("\n========== [Eval Summary] ==========")
-    print(f"must_failed: {must_failed}")
     print(f"factual_failed: {factual_failed}")
-    print(f"low_keypoints_count: {len(low_kps)}")
-    print(f"weakness_types: {weakness}")
+    print(f"weakness_types: {state['weakness_types']}")
 
     return state
-
-def n_prepare_react_query(state: GraphState) -> GraphState:
-    """
-    coverage failed 時才會走到這裡：
-    - easy: query = original query
-    - hard: query = 低分 keypoints（1個就用那個，多個就 concat）
-    """
-
-    # 啟動 reAct retrieval 並增加 round
-    state["react_after_retrieve"] = True
-    state["is_react_retrieval"] = True
-
-    difficulty = state.get("difficulty", "easy")
-    low_kps = state.get("low_keypoints", []) or []
-
-    # easy：直接用原始 query
-    if difficulty == "easy":
-        state["query_current"] = state["query_original"]
-
-        print("\n========== [reAct Triggered] ==========")
-        print("reason: coverage failed")
-        print(f"round: {state['round']}")
-        print(f"new query: {state['query_current']}")
-
-        return _log(state, f"🔁 reAct(coverage) easy：query=original")
-    
-    # hard：使用低分 keypoints
-    if not low_kps:
-        # 理論上不會發生（因為只有 coverage failed 才會進來）
-        state["query_current"] = state["query_original"]
-
-        print("\n========== [reAct Triggered] ==========")
-        print("reason: coverage failed")
-        print(f"round: {state['round']}")
-        print(f"new query: {state['query_current']}")
-
-        return _log(state, f"🔁 reAct(coverage) hard：low_keypoints 空，fallback original")
-
-    # point 欄位：你 evaluator points 裡是 "point"
-    kp_texts = []
-    for p in low_kps:
-        t = str(p.get("point", "")).strip()
-        if t:
-            kp_texts.append(t)
-
-    # 只有一個 keypoint
-    if len(kp_texts) == 1:
-        state["query_current"] = kp_texts[0]
-
-        print("\n========== [reAct Triggered] ==========")
-        print("reason: coverage failed")
-        print(f"round: {state['round']}")
-        print("low_keypoints:")
-        print(json.dumps(low_kps, ensure_ascii=False, indent=2))
-        print(f"new query: {state['query_current']}")
-
-        return _log(state, f"🔁 reAct(coverage) hard：query=低分keypoint(1)")
-
-    # 多個 keypoints → 合併成一個 query
-    q = "；".join(kp_texts)  # 你要用空白/逗號也行
-    state["query_current"] = q
-
-    print("\n========== [reAct Triggered] ==========")
-    print("reason: coverage failed")
-    print(f"round: {state['round']}")
-    print("low_keypoints:")
-    print(json.dumps(low_kps, ensure_ascii=False, indent=2))
-    print(f"new query: {state['query_current']}")
-
-    return _log(state, f"🔁 reAct(coverage) hard：query=低分keypoints({len(kp_texts)})")
 
 def n_revise_answer(state: GraphState) -> GraphState:
     # 根據舊答案與合併後的檢索證據，重新生成修正版答案
@@ -387,9 +256,7 @@ def n_revise_answer(state: GraphState) -> GraphState:
     state["round"] = int(state.get("round", 0)) + 1
 
     weakness = state.get("weakness_types", []) or []
-    low_kps = state.get("low_keypoints", []) or []
-
-    _log(state, f"✍️ revise_answer：weakness={weakness} | low_kps={len(low_kps)}")
+    _log(state, f"✍️ revise_answer：weakness={weakness}")
 
     # 取得舊 + 新文件
     old_docs = state.get("prev_expanded_docs", []) or []
@@ -424,7 +291,6 @@ def n_revise_answer(state: GraphState) -> GraphState:
         query=state.get("query_original", ""),
         prev_answer=state.get("answer", ""),
         weakness_type=weakness,
-        low_keypoints=low_kps,
         context=merged_context
     )
 
@@ -447,7 +313,6 @@ def n_revise_answer(state: GraphState) -> GraphState:
 
     # 關閉 reAct 相關旗標
     state["is_react_retrieval"] = False
-    state["react_after_retrieve"] = False
 
     return state
 
@@ -482,50 +347,18 @@ def n_finalize(state: GraphState) -> GraphState:
 # ---------------------------
 # Routers (conditional edges)
 # ---------------------------
-def r_after_difficulty(state: GraphState) -> str:
-    # 根據 difficulty 決定流程分支：
-    # easy → 不需要 information_need
-    # hard → 需要先拆解 key information points
-    return "easy" if state.get("difficulty") == "easy" else "hard"
-
-def r_after_retrieve_process(state: GraphState) -> str:
-    # retrieve 完之後的分流：
-    #
-    # 如果這一輪是 coverage reAct 檢索
-    # → 不需要重新 generate（因為已經有舊答案）
-    # → 直接進 revise_answer 修正答案
-    #
-    # 如果是正常 retrieval
-    # → 進 generate 產生答案
-    return "revise_answer" if state.get("react_after_retrieve") else "generate"
 
 def r_after_eval(state: GraphState) -> str:
-    # 根據 evaluator 結果決定下一步：
-    # coverage failed → 需要重新檢索（reAct retrieval）
-    # factual failed（但 coverage OK）→ 不需要檢索，直接 revise_answer
-    # 都 OK → finalize
-    must_failed = bool(state.get("must_failed", False))
     factual_failed = bool(state.get("factual_failed", False))
 
-    # 若都沒問題，直接結束
-    if not must_failed and not factual_failed:
+    if not factual_failed:
         return "finalize"
 
-    # 只要還需要修正，就先檢查是否已達上限
     if int(state.get("round", 0)) >= int(state.get("max_rounds", 2)):
         print("答案可能不完全可信")
         return "finalize"
 
-    # coverage fail 優先：需要先重新檢索
-    if must_failed:
-        return "prepare_react_query"
-
-    # 只有 factual fail：直接 revise
-    if factual_failed:
-        return "revise_answer"
-
-    # 3) ok
-    return "finalize"
+    return "revise_answer"
 
 
 # ---------------------------
@@ -539,41 +372,18 @@ def build_app():
     g.add_node("init", n_init)
     g.add_node("predict_difficulty", n_difficulty)
 
-    # hard 專用：先拆解 information needs
-    g.add_node("info_need", n_info_need)
-
     # 共用流程：檢索 / 生成 / 評估 / 修正 / 輸出
     g.add_node("retrieve_process", n_retrieve_process)
     g.add_node("generate", n_generate)
     g.add_node("evaluate", n_evaluate)     
     g.add_node("finalize", n_finalize)
-    g.add_node("prepare_react_query", n_prepare_react_query)
     g.add_node("revise_answer", n_revise_answer)
 
     # 起點流程
     g.add_edge(START, "init")
     g.add_edge("init", "predict_difficulty")
-
-    # Difficulty 分流
-    # easy → 直接檢索
-    # hard → 先做 information need 再檢索
-    g.add_conditional_edges(
-        "predict_difficulty",
-        r_after_difficulty,
-        {"easy": "retrieve_process", "hard": "info_need"}
-    )
-
-    # hard chain
-    g.add_edge("info_need", "retrieve_process")
-
-    # Retrieve 後分流
-    # 正常流程 → generate
-    # coverage reAct retrieval 後 → revise_answer
-    g.add_conditional_edges(
-        "retrieve_process",
-        r_after_retrieve_process,
-        {"generate": "generate", "revise_answer": "revise_answer"}
-    )
+    g.add_edge("predict_difficulty", "retrieve_process")
+    g.add_edge("retrieve_process", "generate")
     g.add_edge("generate", "evaluate")
     g.add_edge("revise_answer", "evaluate")
 
@@ -585,15 +395,10 @@ def build_app():
         "evaluate",
         r_after_eval,
         {
-            "prepare_react_query": "prepare_react_query",
             "revise_answer": "revise_answer",
             "finalize": "finalize",
         }
     )
-
-    # coverage reAct：先產生新 query，再重新檢索
-    g.add_edge("prepare_react_query", "retrieve_process")
-
     g.add_edge("finalize", END)
 
     return g.compile()

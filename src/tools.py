@@ -55,83 +55,32 @@ reranker = FlagReranker(RERANKER_MODEL, use_fp16=RERANKER_FP16)
 # === 各指標答案評分 ===
 def evaluate_answer_metrics(
     query: str,
-    information_points,
     answer: str,
     expanded_docs,
     context: str = "",
     difficulty: str = "hard",
-    alpha: float = 1.0,
-    beta: float = 0.6,
 ) -> str:
     """
-    Answer Evaluator (Coverage + NLI Factuality)
+    Answer Evaluator (NLI-only factual branch)
 
-    Coverage:
-      - 由 answer_evaluation_prompt (LLM) 針對 info points 打分 (0~1)
-      - must_have=True 權重 0.8；False 權重 0.2
-      - 得到 coverage_score ∈ [0,1]
-
-    NLI Factuality:
-      - 呼叫 compute_nli_score()
-      - 直接使用回傳的 C_fact ∈ [0,1]
-
-
-    Final:
-      - C_conf = (coverage_score^alpha) * (C_fact^beta)
-
+    只使用 NLI 檢查答案是否被 context / cited clauses 支持。
     回傳 JSON 字串：
     {
-      "points": [...],
-      "coverage_score": 0.xx,
       "nli": {
-        "probs": {"entailment":..., "neutral":..., "contradiction":...},
+        "entailment": ...,
+        "neutral": ...,
+        "contradiction": ...,
         "factuality": ...,
         "C_fact": ...
       },
       "C_conf": ...,
-      "信心分數": ...   # 為了相容舊版 key
+      "信心分數": ...
     }
     """
 
     # -----------------------
     # helpers
     # -----------------------
-    def _normalize_info_points(obj):
-        if isinstance(obj, str):
-            s = obj.strip()
-            try:
-                obj = json.loads(s)
-            except Exception:
-                try:
-                    start, end = s.find('['), s.rfind(']')
-                    if start != -1 and end != -1 and end > start:
-                        obj = json.loads(s[start:end+1])
-                    else:
-                        obj = [ln.strip() for ln in s.splitlines() if ln.strip()]
-                except Exception:
-                    obj = [ln.strip() for ln in s.splitlines() if ln.strip()]
-
-        if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
-            return [{"id": str(i), "description": desc.strip(), "must_have": True}
-                    for i, desc in enumerate(obj, start=1)]
-
-        norm = []
-        if isinstance(obj, list):
-            seen = set()
-            for i, item in enumerate(obj, start=1):
-                if not isinstance(item, dict):
-                    continue
-                _id = str(item.get("id", str(i)))
-                desc = str(item.get("description", "")).strip()
-                if not desc or desc in seen:
-                    continue
-                must_raw = item.get("must_have", True)
-                must = (must_raw if isinstance(must_raw, bool)
-                        else str(must_raw).lower() in {"true", "1", "yes", "y"})
-                norm.append({"id": _id, "description": desc, "must_have": must})
-                seen.add(desc)
-        return norm
-    
     def _get_doc_fields(d):
         if isinstance(d, dict):
             meta = d.get("meta", {}) or {}
@@ -144,83 +93,7 @@ def evaluate_answer_metrics(
             text = getattr(d, "page_content", "") or ""
             return title, text
 
-    # 1) easy: 把 query 本身當作 must-have keypoint（不需經過 information_need_tool）
-
-    norm_points = _normalize_info_points(information_points)
-
-    if difficulty.lower() == "easy":
-        norm_points = [{
-            "id": "Q",
-            "description": query.strip(),
-            "must_have": True
-        }]
-
-    # 最多 5 個（避免 prompt 爆）
-    norm_points = norm_points[:5]
-    info_points_json = json.dumps(norm_points, ensure_ascii=False)
-
-    # 2) Coverage by LLM
-    chain = answer_evaluation_prompt | client
-    result_msg = chain.invoke({
-        "query": query,
-        "information_points": info_points_json,
-        "answer": answer
-    })
-    raw = (result_msg.content or "").strip()
-
-    # model_points = _parse_points(raw)
-    chain = answer_evaluation_prompt | client
-    result_msg = chain.invoke({
-        "query": query,
-        "information_points": info_points_json,
-        "answer": answer
-    })
-
-    raw = (result_msg.content or "").strip()
-
-    try:
-        model_points = json.loads(raw)
-    except Exception:
-        model_points = []
-
-    must_map = {p["id"]: bool(p.get("must_have", True)) for p in norm_points}
-
-    fixed_points = []
-    for p in model_points:
-        pid = str(p.get("id", "")).strip()
-
-        try:
-            score = float(p.get("分數", 0.0))
-        except Exception:
-            score = 0.0
-
-        fixed_points.append({
-            "id": pid,
-            "point": p.get("point", ""),
-            "must_have": must_map.get(pid, True),
-            "分數": max(0.0, min(1.0, score))
-        })
-
-    # 若模型輸出異常，fallback：用 norm_points 建空白分數
-    if not fixed_points:
-        fixed_points = [{
-            "id": p["id"], "point": p["description"], "must_have": p["must_have"], "分數": 0.0
-        } for p in norm_points]
-
-    # 5) 計算「信心分數」（加權平均）
-    total_w = 0.0
-    total_ws = 0.0
-
-    for p in fixed_points:
-        w = 0.8 if p.get("must_have", True) else 0.2
-        s = float(p.get("分數", 0.0))
-        total_w += w
-        total_ws += w * s
-    # confidence = round((total_ws / total_w) if total_w > 0 else 0.0, 4)
-    coverage_score = round(total_ws / total_w, 4) if total_w else 0.0
-
-
-    # 3 NLI factuality
+    # NLI factuality
     def _extract_reference_block(answer: str) -> str:
         if not isinstance(answer, str):
             return ""
@@ -232,27 +105,6 @@ def evaluate_answer_metrics(
 
     cited_articles = re.findall(r"第[一二三四五六七八九十百千0-9]+條", ref_block)
     cited_articles = list(set(cited_articles))
-
-    # 是否包含「摘要」
-    SUMMARY_KEYWORDS = [
-        "摘要",
-        "內容摘要",
-        "條款摘要",
-        "條文摘要",
-        "重點摘要",
-        "說明",
-        "條款說明",
-        "概述",
-        "保障範圍",
-        "保障內容",
-        "附表"
-    ]
-    include_summary = any(k in ref_block for k in SUMMARY_KEYWORDS)
-
-    debug_cited_ids = []
-    if include_summary:
-        debug_cited_ids.append("摘要")
-    debug_cited_ids.extend(cited_articles)
 
     print("\n========== [DEBUG expanded_docs] ==========")
     print("cited_ids", cited_articles)
@@ -300,17 +152,11 @@ def evaluate_answer_metrics(
             "C_fact": 0.0
         }
 
-    C_conf = round(
-        (coverage_score ** alpha) *
-        (best_nli["C_fact"] ** beta),
-        4
-    )
+    c_fact = float(best_nli.get("C_fact", best_nli.get("factuality", 0.0)))
 
     output = {
-        "points": fixed_points,
-        "coverage_score": coverage_score,
         "nli": best_nli,
-        "C_conf": C_conf
+        "C_conf": round(c_fact, 4)
     }
 
     return json.dumps(output, ensure_ascii=False)
@@ -535,16 +381,8 @@ def generate_answer_tool(query: str, context: str, info_points=None) -> dict:
     if not ctx:
         return {"answer": "找不到相關內容", "context": ""}
 
-    try:
-        if info_points:
-            info_points_str = json.dumps(info_points, ensure_ascii=False, indent=2)
-        else:
-            info_points_str = "[]"
-    except Exception:
-        info_points_str = "[]"
-
     chain = prompt | client
-    result_msg = chain.invoke({"context": ctx, "query": query, "info_points": info_points_str})
+    result_msg = chain.invoke({"context": ctx, "query": query})
     answer = result_msg.content.strip()
     return {"answer": answer, "context": ctx}
 
@@ -553,7 +391,6 @@ def revise_answer_tool(
     query: str,
     prev_answer: str,
     weakness_type,
-    low_keypoints,
     context: str
 ) -> dict:
     """
@@ -566,18 +403,11 @@ def revise_answer_tool(
     else:
         weakness_str = str(weakness_type)
 
-    # low_keypoints → JSON 字串
-    try:
-        low_kp_str = json.dumps(low_keypoints or [], ensure_ascii=False)
-    except Exception:
-        low_kp_str = "[]"
-
     chain = answer_revision_prompt | client
     result_msg = chain.invoke({
         "query": (query or "").strip(),
         "prev_answer": (prev_answer or "").strip(),
         "weakness_type": weakness_str,
-        "low_keypoints": low_kp_str,
         "retrieved_docs": context  # ← 已經是文字
     })
 
