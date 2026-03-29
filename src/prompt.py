@@ -238,25 +238,14 @@ You are given:
 
 - prev_answer
 - weakness_type (may contain "coverage", "factual", or both)
-- low_keypoints (only meaningful if weakness_type includes "coverage")
 - retrieved_docs (the ONLY source of truth)
 
 Follow these rules:
 
-1) If weakness_type includes "coverage":
-   - Improve ONLY the parts related to low_keypoints.
-   - Keep the rest of the answer as close as possible to prev_answer.
-   - Do NOT rewrite unrelated sections unnecessarily.
-
-2) If weakness_type includes "factual":
+If weakness_type includes "factual":
    - EVERY statement must be directly supported by retrieved_docs.
    - If any part of prev_answer lacks support, correct or remove it.
    - Never guess, infer, or extrapolate.
-
-3) If both coverage and factual exist:
-   - First ensure factual correctness.
-   - Then strengthen low_keypoints without introducing unsupported claims.
-
 ---
 
 ###Date Reasoning Rules###
@@ -286,9 +275,6 @@ Previous Answer:
 Weakness Type:
 {weakness_type}
 
-Low Keypoints:
-{low_keypoints}
-
 Retrieved Documents:
 {retrieved_docs}
 """
@@ -299,7 +285,6 @@ answer_revision_prompt = PromptTemplate(
         "query",
         "prev_answer",
         "weakness_type",
-        "low_keypoints",
         "retrieved_docs"
     ]
 )
