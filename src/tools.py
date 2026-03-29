@@ -388,7 +388,7 @@ def retrieve_process_tool(
     k_retrieve_easy: int = 5,
     k_retrieve_hard: int = 8,
     # expand cap
-    top_k_rerank: int = 5,
+    top_k_rerank: int = 8,
     max_expand_easy: int = 10,
     max_expand_hard: int = 15,
 ) -> dict:
