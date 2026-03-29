@@ -21,6 +21,7 @@ HEADERS = [
     "C_fact(final)",
     "C_conf(final)",
     "timestamp",
+    "latency_sec",
 ]
 
 
@@ -142,6 +143,7 @@ def append_graph_result_to_excel(state: Dict[str, Any], excel_path: str = "rag_r
         _safe_float(nli.get("C_fact", nli.get("factuality"))),
         _safe_float(eval_obj.get("C_conf", eval_obj.get("信心分數"))),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        _safe_float(state.get("latency")),
     ]
 
     ws.append(row)
@@ -152,7 +154,7 @@ def append_graph_result_to_excel(state: Dict[str, Any], excel_path: str = "rag_r
         ws.cell(row=row_idx, column=col_idx).alignment = WRAP_TOP
 
     # 數字格式
-    for col_idx in [10, 11, 12]:
+    for col_idx in [10, 11, 12, 14]:
         ws.cell(row=row_idx, column=col_idx).number_format = "0.0000"
         ws.cell(row=row_idx, column=col_idx).alignment = Alignment(horizontal="right", vertical="top")
 

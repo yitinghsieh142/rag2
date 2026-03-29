@@ -21,8 +21,9 @@
 
 import os
 import json
+import time
 from typing import TypedDict, Optional, List, Dict, Any, Literal
-
+import pandas as pd
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
 from langchain.schema import Document
@@ -50,6 +51,11 @@ llm = AzureChatOpenAI(
     openai_api_version=os.getenv("OPENAI_API_VERSION"),
     temperature=0
 )
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # src/
+PROJECT_ROOT = os.path.dirname(BASE_DIR)                # 專案根目錄
+BATCH_QUESTION_PATH = os.path.join(PROJECT_ROOT, "data", "題目.xlsx")
+RESULT_EXCEL_PATH = os.path.join(PROJECT_ROOT, "rag_results_reranker.xlsx")
+
 
 # ---------------------------
 # Graph State
@@ -74,6 +80,11 @@ class GraphState(TypedDict, total=False):
     logs: List[str]                           # debug 用 log list
     answer_history: List[str]
 
+    # batch / timing
+    row_index: int
+    start_time: float
+    latency: float
+
 # ---------------------------
 # 小工具：log / parse
 # ---------------------------
@@ -85,10 +96,17 @@ def _log(state: GraphState, msg: str) -> GraphState:
     print(msg)
     return state
 
+def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    for col in df.columns:
+        if str(col).strip() in candidates:
+            return col
+    return None
 # ---------------------------
 # Nodes
 # ---------------------------
 def n_init(state: GraphState) -> GraphState:
+    state["start_time"] = time.time()
+    
     # 初始化整個流程的狀態，重置所有控制與評估相關欄位
     q = state["query_original"]
 
@@ -105,6 +123,11 @@ def n_init(state: GraphState) -> GraphState:
     state["answer_history"] = []
 
     pid = state.get("product_id")
+    row_index = state.get("row_index")
+
+    if row_index is not None:
+        return _log(state, f"📌 [第 {row_index} 題] 已鎖定產品名稱：{pid}")
+    
     return _log(state, f"📌 已鎖定產品名稱：{pid}")
 
 def n_difficulty(state: GraphState) -> GraphState:
@@ -151,6 +174,12 @@ def n_generate(state: GraphState) -> GraphState:
     return state
 
 def n_finalize(state: GraphState) -> GraphState:
+    start_time = state.get("start_time")
+    if start_time:
+        state["latency"] = round(time.time() - start_time, 2)
+    else:
+        state["latency"] = None
+
     # 輸出最終答案、來源 chunk 與評估結果（目前用 print，之後可改成回傳 JSON）
     print("\n================= Final Response =================")
     print("【答案】")
@@ -166,6 +195,8 @@ def n_finalize(state: GraphState) -> GraphState:
             print(f"- [{i}] CHUNK_ID={cid} {title}".strip())
     else:
         print("(無)")
+
+    print(f"\n⏱️ 本題耗時：{state.get('latency')} 秒")
 
     print("=====================================================\n")
     excel_path = append_graph_result_to_excel(
@@ -205,11 +236,9 @@ def build_app():
     return g.compile()
 
 # ---------------------------
-# CLI
+# 單題模式
 # ---------------------------
-def main():
-    app = build_app()
-
+def run_single_mode(app):
     while True:
         product_id = input("🏷️ 請先輸入產品代號/名稱（Enter 離開）：").strip()
         if not product_id:
@@ -221,15 +250,100 @@ def main():
             print("👋 結束保險問答")
             break
 
-        # 每次 query 初始化 state
         state: GraphState = {
             "product_id": product_id,
             "query_original": q,
-            "max_rounds": 2,
         }
 
         print("🔍 正在分析並回答問題...")
         app.invoke(state)
+
+# ---------------------------
+# 批次模式
+# ---------------------------
+def run_batch_mode(app, excel_path: str = BATCH_QUESTION_PATH):
+    if not os.path.exists(excel_path):
+        print(f"❌ 找不到題目檔案：{excel_path}")
+        return
+
+    df = pd.read_excel(excel_path)
+    print(f"📂 已讀取題目檔：{excel_path}")
+    print(f"📊 總筆數：{len(df)}")
+    print(f"📑 欄位：{list(df.columns)}")
+
+    question_col = find_column(df, ["問題", "query", "question", "題目"])
+    product_col = find_column(df, ["產品代號", "product_id", "product", "商品代號", "商品名稱", "產品名稱"])
+
+    if question_col is None:
+        print("❌ 題目.xlsx 找不到問題欄位")
+        print("   可接受欄名：問題 / query / question / 題目")
+        return
+
+    if product_col is None:
+        print("❌ 題目.xlsx 找不到產品欄位")
+        print("   可接受欄名：產品代號 / product_id / product / 商品代號 / 商品名稱 / 產品名稱")
+        return
+
+    success_count = 0
+    fail_count = 0
+
+    for idx, row in df.iterrows():
+        q = str(row[question_col]).strip() if pd.notna(row[question_col]) else ""
+        product_id = str(row[product_col]).strip() if pd.notna(row[product_col]) else ""
+
+        if not q:
+            print(f"\n⚠️ 第 {idx + 1} 列問題為空，跳過")
+            fail_count += 1
+            continue
+
+        if not product_id:
+            print(f"\n⚠️ 第 {idx + 1} 列產品代號為空，跳過")
+            fail_count += 1
+            continue
+
+        print("\n" + "=" * 80)
+        print(f"🚀 開始處理第 {idx + 1} 題")
+        print(f"🏷️ 產品：{product_id}")
+        print(f"📝 問題：{q}")
+        print("=" * 80)
+
+        state: GraphState = {
+            "row_index": idx + 1,
+            "product_id": product_id,
+            "query_original": q,
+        }
+
+        try:
+            app.invoke(state)
+            success_count += 1
+        except Exception as e:
+            fail_count += 1
+            print(f"❌ 第 {idx + 1} 題執行失敗：{e}")
+
+    print("\n================= Batch Done =================")
+    print(f"✅ 成功：{success_count}")
+    print(f"❌ 失敗：{fail_count}")
+    print(f"📘 結果已累積寫入：{RESULT_EXCEL_PATH}")
+    print("==============================================\n")
+
+# ---------------------------
+# CLI
+# ---------------------------
+def main():
+    app = build_app()
+
+    print("請選擇模式：")
+    print("1. 單題模式")
+    print("2. 批次模式（讀取 ../data/題目.xlsx）")
+
+    mode = input("請輸入 1 或 2：").strip()
+
+    if mode == "1":
+        run_single_mode(app)
+    elif mode == "2":
+        run_batch_mode(app)
+    else:
+        print("❌ 無效選項")
 
 if __name__ == "__main__":
     main()
