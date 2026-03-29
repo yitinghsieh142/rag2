@@ -260,7 +260,7 @@ def run_excel_mode():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
 
-    default_input_path = os.path.join(project_root, "data", "stat_factual.xlsx")
+    default_input_path = os.path.join(project_root, "data", "stat_factual8.xlsx")
 
     print("\nExcel 批次驗證模式")
     user_path = input(f"請輸入 Excel 路徑（直接 Enter 使用預設：{default_input_path}）：").strip()
