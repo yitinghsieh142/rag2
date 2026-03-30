@@ -7,7 +7,7 @@ from langchain_core.runnables import Runnable
 from langchain.schema import BaseRetriever
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from FlagEmbedding import FlagReranker
+# from FlagEmbedding import FlagReranker
 
 
 import os
@@ -47,9 +47,9 @@ embeddings = HuggingFaceEmbeddings(
     encode_kwargs={"normalize_embeddings": True, "batch_size": 8}
 )
 
-RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-RERANKER_FP16 = os.getenv("RERANKER_FP16", "1").lower() in {"1", "true", "yes"}
-reranker = FlagReranker(RERANKER_MODEL, use_fp16=RERANKER_FP16)
+# RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+# RERANKER_FP16 = os.getenv("RERANKER_FP16", "1").lower() in {"1", "true", "yes"}
+# reranker = FlagReranker(RERANKER_MODEL, use_fp16=RERANKER_FP16)
 
 
 # === 各指標答案評分 ===
@@ -236,7 +236,7 @@ def retrieve_process_tool(
     k_retrieve_hard: int = 8,
     # reAct 檢索規格
     k_retrieve_react: int = 10,
-    top_k_rerank: int = 8,
+    # top_k_rerank: int = 8,
     # expand cap
     max_expand_easy: int = 10,
     max_expand_hard: int = 15,
@@ -272,18 +272,18 @@ def retrieve_process_tool(
     if is_react:
         # reAct 規格（你指定）
         k_retrieve = k_retrieve_react
-        do_rerank = True
+        # do_rerank = True
         max_expand = max_expand_hard
     else:
         # 初始檢索（維持你原本規格）
         if difficulty == "easy":
             k_retrieve = k_retrieve_easy       # 5
             max_expand = max_expand_easy       # 10
-            do_rerank = False
+            # do_rerank = False
         else:
             k_retrieve = k_retrieve_hard       # 8
             max_expand = max_expand_hard       # 15
-            do_rerank = True
+            # do_rerank = True
 
     prod_id = product_id or extract_prod_id_from_query(query)
     if not prod_id:
@@ -317,37 +317,37 @@ def retrieve_process_tool(
     # -----------------------
     # 2) optional rerank (hard only)
     # -----------------------
-    if do_rerank:
-        pairs = [[query, d["text"]] for d in docs_in]
-        try:
-            scores = reranker.compute_score(pairs, normalize=True)
-        except Exception as e:
-            return {
-                "retrieved_docs": docs_in,
-                "expanded_docs": [],
-                "context": "",
-                "error": f"reranker 失敗：{e}"
-            }
+    # if do_rerank:
+    #     pairs = [[query, d["text"]] for d in docs_in]
+    #     try:
+    #         scores = reranker.compute_score(pairs, normalize=True)
+    #     except Exception as e:
+    #         return {
+    #             "retrieved_docs": docs_in,
+    #             "expanded_docs": [],
+    #             "context": "",
+    #             "error": f"reranker 失敗：{e}"
+    #         }
 
-        scored = []
-        for d, s in zip(docs_in, scores):
-            e = dict(d)
-            e["score"] = float(s)
-            scored.append(e)
+    #     scored = []
+    #     for d, s in zip(docs_in, scores):
+    #         e = dict(d)
+    #         e["score"] = float(s)
+    #         scored.append(e)
 
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        top = scored[:max(1, min(top_k_rerank, len(scored)))]
+    #     scored.sort(key=lambda x: x["score"], reverse=True)
+    #     top = scored[:max(1, min(top_k_rerank, len(scored)))]
 
-        print("\n========== [Reranked Top Docs - BGE v2-m3 | hard] ==========")
-        for i, d in enumerate(top):
-            cid = d.get("meta", {}).get("CHUNK_ID")
-            print(f"[{i}] score={d['score']:.3f} CHUNK_ID={cid}\n{d['text']}\n")
+    #     print("\n========== [Reranked Top Docs - BGE v2-m3 | hard] ==========")
+    #     for i, d in enumerate(top):
+    #         cid = d.get("meta", {}).get("CHUNK_ID")
+    #         print(f"[{i}] score={d['score']:.3f} CHUNK_ID={cid}\n{d['text']}\n")
 
-        base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in top]
-    else:
-        # easy: 不 rerank，直接用原順序
-        base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in docs_in]
-
+    #     base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in top]
+    # else:
+    #     # easy: 不 rerank，直接用原順序
+    #     base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in docs_in]
+    base_docs = [Document(page_content=d["text"], metadata=d["meta"]) for d in docs_in]
 
     # -----------------------
     # 3) expand + cap
