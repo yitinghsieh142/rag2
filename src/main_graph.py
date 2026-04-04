@@ -51,8 +51,8 @@ llm = AzureChatOpenAI(
 )
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # src/
 PROJECT_ROOT = os.path.dirname(BASE_DIR)                # 專案根目錄
-BATCH_QUESTION_PATH = os.path.join(PROJECT_ROOT, "data", "題目.xlsx")
-RESULT_EXCEL_PATH = os.path.join(PROJECT_ROOT, "rag_results_factual.xlsx")
+BATCH_QUESTION_PATH = os.path.join(PROJECT_ROOT, "data", "題目2.xlsx")
+RESULT_EXCEL_PATH = os.path.join(PROJECT_ROOT, "rag_results.xlsx")
 
 
 # ---------------------------
