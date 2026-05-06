@@ -14,7 +14,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # === 向量儲存 ===
 def build_vectorstore(prod_id: str):
-    return Chroma(persist_directory=f"../chroma_db/{prod_id}", embedding_function=embeddings)
+    return Chroma(persist_directory=f"../chroma_db2/{prod_id}", embedding_function=embeddings)
 
 # === embeedding 模型 ===
 embeddings = HuggingFaceEmbeddings(

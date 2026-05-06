@@ -3,6 +3,7 @@
 
 # LangChain / Chroma vector DB
 chroma_db/
+chroma_db2/
 
 # model 跟其他 output folder
 models/

@@ -54,8 +54,8 @@ llm = AzureChatOpenAI(
 )
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # src/
 PROJECT_ROOT = os.path.dirname(BASE_DIR)                # 專案根目錄
-BATCH_QUESTION_PATH = os.path.join(PROJECT_ROOT, "data", "題目.xlsx")
-RESULT_EXCEL_PATH = os.path.join(PROJECT_ROOT, "rag_results_main.xlsx")
+BATCH_QUESTION_PATH = os.path.join(PROJECT_ROOT, "data", "測試題目.xlsx")
+RESULT_EXCEL_PATH = os.path.join(PROJECT_ROOT, "rag_results_rob.xlsx")
 
 # ---------------------------
 # Graph State
@@ -727,7 +727,7 @@ def main():
 
     print("請選擇模式：")
     print("1. 單題模式")
-    print("2. 批次模式（讀取 ../data/題目.xlsx）")
+    print("2. 批次模式（讀取 ../data/測試題目.xlsx）")
 
     mode = input("請輸入 1 或 2：").strip()
 

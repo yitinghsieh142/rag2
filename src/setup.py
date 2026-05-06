@@ -20,12 +20,14 @@ embeddings = HuggingFaceEmbeddings(
 )
 
 # 向量儲存處理
-output_folder = "../output"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+output_folder = os.path.join(BASE_DIR, "..", "output", "保險條款測試")
+
 all_docs = []
 # 跑全部
-# prod_folders = [f for f in os.listdir(output_folder) if os.path.isdir(os.path.join(output_folder, f))]
+prod_folders = [f for f in os.listdir(output_folder) if os.path.isdir(os.path.join(output_folder, f))]
 # 跑特定檔案
-prod_folders = ["CFG"]
+# prod_folders = ["CFG"]
 prod_folders = [f for f in prod_folders if os.path.isdir(os.path.join(output_folder, f))]
 
 for prod_id in tqdm(prod_folders, desc="Processing Products"):
@@ -123,7 +125,7 @@ for prod_id in tqdm(prod_folders, desc="Processing Products"):
             )
 
     if doc_list:
-        persist_path = f"../chroma_db/{prod_id}"
+        persist_path = f"../chroma_db2/{prod_id}"
         vectorstore = Chroma(persist_directory=persist_path, embedding_function=embeddings)
         uuids = [str(uuid4()) for _ in range(len(doc_list))]
         vectorstore.add_documents(documents=doc_list, ids=uuids)
