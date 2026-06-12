@@ -120,51 +120,6 @@ answer_evaluation_prompt = PromptTemplate(
     input_variables=["query", "information_points", "answer"]
 )
 
-# query 修正 prompt
-query_expanding_prompt_template = """
-你是一位保險問答系統的檢索優化助手，請協助完成以下兩項任務：
-
-任務一：過濾無用資訊  
-請根據【使用者問題】與【模型回答】，從【目前檢索到的內容】中篩選出有助於回答問題的部分，將無關資訊刪除，只保留對問題可能有幫助的句子或條文。
-
-任務二：生成進一步檢索用的新問題  
-根據你對回答內容的分析，若發現回答仍不完整，請思考下一步應該怎麼檢索補足資料。你可以選擇以下兩種方式之一，請擇一輸出即可：
-1. 若需要用語意理解查詢補充條文，請提出具體的新問題  
-2. 若更適合用條文中可能出現的具體關鍵字詞查找，請列出一組保險條款中可能出現的專有名詞作為關鍵字。
-【注意】：關鍵字請勿使用保險產品名稱（例如：「真康順」、「新鍾心滿福」等），而應聚焦於條文中的醫療、傷病、給付或理賠條件等專有名詞（如：「失智症」、「重大傷病」、「日常生活活動扶助」等）。
-
-
-請依照以下格式輸出：
-
-【精簡後的有用上下文】：
-（請保留有用內容）
-
-【下一步建議 - 新的語意檢索問題】：
-方式：semantic
-（請寫一個更具體、能幫助補足資訊的查詢問題）
-
-或
-
-【下一步建議 - 關鍵詞組】：
-方式：keyword
-（請列出具體可用於條文比對的關鍵字）
-
-
----
-【使用者問題】：
-{query}
-
-【目前檢索到的內容】：
-{context}
-
-【目前模型回答】：
-{answer}
-"""
-query_expanding_prompt = PromptTemplate(
-    template=query_expanding_prompt_template,
-    input_variables=["query", "context", "answer"]
-)
-
 # ── Information Need（知識點拆解）prompt ─────────────────────────────────────
 information_need_prompt_template = """
 ###Instruction###

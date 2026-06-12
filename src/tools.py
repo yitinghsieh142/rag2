@@ -63,35 +63,6 @@ def evaluate_answer_metrics(
     alpha: float = 1.0,
     beta: float = 0.6,
 ) -> str:
-    """
-    Answer Evaluator (Coverage + NLI Factuality)
-
-    Coverage:
-      - 由 answer_evaluation_prompt (LLM) 針對 info points 打分 (0~1)
-      - must_have=True 權重 0.8；False 權重 0.2
-      - 得到 coverage_score ∈ [0,1]
-
-    NLI Factuality:
-      - 呼叫 compute_nli_score()
-      - 直接使用回傳的 C_fact ∈ [0,1]
-
-
-    Final:
-      - C_conf = (coverage_score^alpha) * (C_fact^beta)
-
-    回傳 JSON 字串：
-    {
-      "points": [...],
-      "coverage_score": 0.xx,
-      "nli": {
-        "probs": {"entailment":..., "neutral":..., "contradiction":...},
-        "factuality": ...,
-        "C_fact": ...
-      },
-      "C_conf": ...,
-      "信心分數": ...   # 為了相容舊版 key
-    }
-    """
 
     # -----------------------
     # helpers
@@ -413,16 +384,6 @@ def retrieve_process_tool(
     # -----------------------
     # 0) decide params
     # -----------------------
-    # if difficulty == "easy":
-    #     k_retrieve = k_retrieve_easy
-    #     max_expand = max_expand_easy
-    #     do_rerank = False
-    #     top_k_rerank = 0
-    # else:
-    #     k_retrieve = k_retrieve_hard
-    #     max_expand = max_expand_hard
-    #     do_rerank = True
-    #     top_k_rerank = top_k_rerank_hard
     if is_react:
         # reAct 規格（你指定）
         k_retrieve = k_retrieve_react
@@ -441,7 +402,7 @@ def retrieve_process_tool(
 
     prod_id = product_id or extract_prod_id_from_query(query)
     if not prod_id:
-        return {"error": "❌ 無法判斷產品名稱"}
+        return {"error": "無法判斷產品名稱"}
 
     vectorstore = build_vectorstore(prod_id)
 

@@ -6,7 +6,6 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# MODEL_NAME = os.getenv("NLI_MODEL", "IDEA-CCNL/Erlangshen-Roberta-110M-NLI")
 MODEL_NAME = os.getenv("NLI_MODEL", "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
 _tok = None
 _model = None

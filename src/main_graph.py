@@ -97,11 +97,6 @@ class GraphState(TypedDict, total=False):
     is_react_retrieval: bool                  # 這一輪 retrieve 是否用 reAct 規格(top10/rerank5/expand)
     react_after_retrieve: bool                # retrieve 後是否直接走 revise（跳過 generate）
 
-    # (Legacy) Rewrite-related fields (目前你已不主要用到)
-    # route: Literal["semantic", "keyword"]
-    # keywords: List[str]
-    # extra_context: str
-
     # Debug / Logs
     logs: List[str]                           # debug 用 log list
     answer_history: List[str]
@@ -498,7 +493,7 @@ def n_finalize(state: GraphState) -> GraphState:
     print("\n【評估】")
     ev = state.get("eval", {}) or {}
     print(json.dumps(ev, ensure_ascii=False, indent=2))
-    print(f"\n⏱️ 本題耗時：{state.get('latency')} 秒")
+    print(f"\n本題耗時：{state.get('latency')} 秒")
     print("=====================================================\n")
     excel_path = append_graph_result_to_excel(
         state,
@@ -633,12 +628,12 @@ def run_single_mode(app):
     while True:
         product_id = input("🏷️ 請先輸入產品代號/名稱（Enter 離開）：").strip()
         if not product_id:
-            print("👋 結束保險問答")
+            print("結束保險問答")
             break
 
-        q = input("📝 請輸入保險問題（Enter 離開）：").strip()
+        q = input("請輸入保險問題（Enter 離開）：").strip()
         if not q:
-            print("👋 結束保險問答")
+            print("結束保險問答")
             break
 
         state: GraphState = {
@@ -647,7 +642,7 @@ def run_single_mode(app):
             "max_rounds": 2,
         }
 
-        print("🔍 正在分析並回答問題...")
+        print("正在分析並回答問題...")
         app.invoke(state)
 
 # ---------------------------
@@ -655,24 +650,24 @@ def run_single_mode(app):
 # ---------------------------
 def run_batch_mode(app, excel_path: str = BATCH_QUESTION_PATH):
     if not os.path.exists(excel_path):
-        print(f"❌ 找不到題目檔案：{excel_path}")
+        print(f"找不到題目檔案：{excel_path}")
         return
 
     df = pd.read_excel(excel_path)
-    print(f"📂 已讀取題目檔：{excel_path}")
-    print(f"📊 總筆數：{len(df)}")
-    print(f"📑 欄位：{list(df.columns)}")
+    print(f"已讀取題目檔：{excel_path}")
+    print(f"總筆數：{len(df)}")
+    print(f"欄位：{list(df.columns)}")
 
     question_col = find_column(df, ["問題", "query", "question", "題目"])
     product_col = find_column(df, ["產品代號", "product_id", "product", "商品代號", "商品名稱", "產品名稱"])
 
     if question_col is None:
-        print("❌ 題目.xlsx 找不到問題欄位")
+        print("題目.xlsx 找不到問題欄位")
         print("   可接受欄名：問題 / query / question / 題目")
         return
 
     if product_col is None:
-        print("❌ 題目.xlsx 找不到產品欄位")
+        print("題目.xlsx 找不到產品欄位")
         print("   可接受欄名：產品代號 / product_id / product / 商品代號 / 商品名稱 / 產品名稱")
         return
 
@@ -684,19 +679,19 @@ def run_batch_mode(app, excel_path: str = BATCH_QUESTION_PATH):
         product_id = str(row[product_col]).strip() if pd.notna(row[product_col]) else ""
 
         if not q:
-            print(f"\n⚠️ 第 {idx + 1} 列問題為空，跳過")
+            print(f"\n第 {idx + 1} 列問題為空，跳過")
             fail_count += 1
             continue
 
         if not product_id:
-            print(f"\n⚠️ 第 {idx + 1} 列產品代號為空，跳過")
+            print(f"\n第 {idx + 1} 列產品代號為空，跳過")
             fail_count += 1
             continue
 
         print("\n" + "=" * 80)
-        print(f"🚀 開始處理第 {idx + 1} 題")
-        print(f"🏷️ 產品：{product_id}")
-        print(f"📝 問題：{q}")
+        print(f"開始處理第 {idx + 1} 題")
+        print(f"產品：{product_id}")
+        print(f"問題：{q}")
         print("=" * 80)
 
         state: GraphState = {
@@ -711,12 +706,12 @@ def run_batch_mode(app, excel_path: str = BATCH_QUESTION_PATH):
             success_count += 1
         except Exception as e:
             fail_count += 1
-            print(f"❌ 第 {idx + 1} 題執行失敗：{e}")
+            print(f"第 {idx + 1} 題執行失敗：{e}")
 
     print("\n================= Batch Done =================")
-    print(f"✅ 成功：{success_count}")
-    print(f"❌ 失敗：{fail_count}")
-    print(f"📘 結果已累積寫入：{RESULT_EXCEL_PATH}")
+    print(f"成功：{success_count}")
+    print(f"失敗：{fail_count}")
+    print(f"結果已累積寫入：{RESULT_EXCEL_PATH}")
     print("==============================================\n")
 
 # ---------------------------
@@ -736,7 +731,7 @@ def main():
     elif mode == "2":
         run_batch_mode(app)
     else:
-        print("❌ 無效選項")
+        print("無效選項")
 
 if __name__ == "__main__":
     main()

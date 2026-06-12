@@ -6,7 +6,6 @@ import json
 from tqdm import tqdm
 from uuid import uuid4
 
-# 設定 Hugging Face 的免費 Embedding 模型
 embeddings = HuggingFaceEmbeddings(
     model_name="BAAI/bge-m3",
     model_kwargs={
@@ -26,8 +25,6 @@ output_folder = os.path.join(BASE_DIR, "..", "output", "保險條款測試")
 all_docs = []
 # 跑全部
 prod_folders = [f for f in os.listdir(output_folder) if os.path.isdir(os.path.join(output_folder, f))]
-# 跑特定檔案
-# prod_folders = ["CFG"]
 prod_folders = [f for f in prod_folders if os.path.isdir(os.path.join(output_folder, f))]
 
 for prod_id in tqdm(prod_folders, desc="Processing Products"):

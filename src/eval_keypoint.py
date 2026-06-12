@@ -221,7 +221,7 @@ def run_single_mode():
 
         generated_answer = input("輸入回答：").strip()
         if not generated_answer:
-            print("❌ 回答不可為空")
+            print("回答不可為空")
             continue
 
         keypoints_raw = input("輸入 keypoints（Python list 格式，例如 ['A', 'B']）：").strip()
@@ -230,7 +230,7 @@ def run_single_mode():
             if not isinstance(keypoints_list, list):
                 raise ValueError
         except Exception:
-            print("❌ keypoints 格式錯誤，請確保是 Python list 格式，例如：['A', 'B']")
+            print("keypoints 格式錯誤，請確保是 Python list 格式，例如：['A', 'B']")
             continue
 
         score_output, completeness, hallucination, irrelevance, output_text, llm_reasoning = score_single_case(
@@ -267,7 +267,7 @@ def run_excel_mode():
     input_path = user_path if user_path else default_input_path
 
     if not os.path.exists(input_path):
-        print(f"❌ 找不到檔案：{input_path}")
+        print(f"找不到檔案：{input_path}")
         return
 
     print(f"讀取檔案中：{input_path}")
@@ -276,7 +276,7 @@ def run_excel_mode():
     required_cols = ["商品代號", "問題", "回答", "Keypoint"]
     for col in required_cols:
         if col not in df.columns:
-            print(f"❌ Excel 缺少欄位：{col}")
+            print(f"Excel 缺少欄位：{col}")
             return
 
     # 保留你要的欄名拼法
@@ -303,7 +303,7 @@ def run_excel_mode():
         print(f"處理第 {idx + 1}/{total} 筆 | 商品代號: {product_code}")
 
         if not question or not answer or not keypoints_list:
-            print("  ⚠️ 問題 / 回答 / Keypoint 缺值，跳過")
+            print("問題 / 回答 / Keypoint 缺值，跳過")
             df.at[idx, "completeness"] = None
             df.at[idx, "hallucination"] = None
             df.at[idx, "irrlevance"] = None
@@ -323,13 +323,13 @@ def run_excel_mode():
             df.at[idx, "llm_reasoning"] = llm_reasoning
 
             print(
-                f"  ✅ completeness={completeness:.4f}, "
+                f"completeness={completeness:.4f}, "
                 f"hallucination={hallucination:.4f}, "
                 f"irrlevance={irrelevance:.4f}"
             )
 
         except Exception as e:
-            print(f"  ❌ 第 {idx + 1} 筆失敗：{e}")
+            print(f"  第 {idx + 1} 筆失敗：{e}")
             df.at[idx, "completeness"] = None
             df.at[idx, "hallucination"] = None
             df.at[idx, "irrlevance"] = None
@@ -345,7 +345,7 @@ def run_excel_mode():
         output_path = f"{base}_scored{ext}"
 
     df.to_excel(output_path, index=False)
-    print(f"\n✅ 已完成並儲存至：{output_path}")
+    print(f"\n已完成並儲存至：{output_path}")
 
 
 # =========================
@@ -363,7 +363,7 @@ def main():
     elif mode == "2":
         run_excel_mode()
     else:
-        print("❌ 無效輸入，請重新執行")
+        print("無效輸入，請重新執行")
 
 
 if __name__ == "__main__":
